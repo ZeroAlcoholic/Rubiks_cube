@@ -6214,21 +6214,51 @@
                     this.exitShotReview(false);
                     this.closeScanner();
                     await this._finishScanAndSolve(state, 'two-shot');
-                } else {
-                    // Validation failed — keep review open so user can continue editing
-                    const NAMES = {U:'黃',R:'橙',F:'藍',D:'白',L:'紅',B:'綠'};
-                    const errMsg = v.errors.map(e => {
-                        const m = e.match(/^([URFDLB]) 貼紙數為 (\d+)/);
-                        if (m) return `${NAMES[m[1]]||m[1]}色有${m[2]}個（需9）`;
-                        if (e.includes('中心格')) return '有顏色面重複';
-                        if (e.includes('cubejs')) return '奇偶校驗錯誤';
-                        return e;
-                    }).join('；');
-                    const hint = document.getElementById('shot-review-hint');
-                    if (hint) {
-                        hint.classList.add('active');
-                        hint.innerHTML = `<span style="color:#fca5a5">⚠ ${errMsg}，請修色後再確認</span>`;
+                    return;
+                }
+                // 兩拍模式驗證失敗：若只有 cubejs 奇偶錯誤，嘗試深度修復（與六面流程一致）
+                const onlyParity = v.errors.length > 0 &&
+                    v.errors.every(e => e.includes('cubejs') || e.includes('忠實解析'));
+                if (onlyParity) {
+                    // 把 shotReviewAllEdited+current 寫入 scanConfirmedFaces 才能用 _tryDeepAutoFix
+                    const prevConfirmed = this.scanConfirmedFaces;
+                    const prevUserEdits = this.scanFaceUserEdits;
+                    this.scanConfirmedFaces = {};
+                    this.scanFaceUserEdits = {};
+                    [...(this.shotReviewAllEdited || []), ...this.shotReviewCurrentPanels].forEach(p => {
+                        this.scanConfirmedFaces[p.expectedFace] = [...p.classifiedColors];
+                        this.scanFaceUserEdits[p.expectedFace] = [...(p.userEdits || new Array(9).fill(false))];
+                    });
+                    STATE_FACE_ORDER.forEach(f => {
+                        if (this.scanConfirmedFaces[f]) this.scanConfirmedFaces[f][4] = f;
+                    });
+                    const fixedState = this._tryDeepAutoFix();
+                    if (fixedState) {
+                        this.shotReviewAllEdited.push(...this.shotReviewCurrentPanels);
+                        this.exitShotReview(false);
+                        this.closeScanner();
+                        await this._finishScanAndSolve(fixedState, 'two-shot-deep-fix');
+                        // 還原（其實 closeScanner 也會清；保險起見）
+                        this.scanConfirmedFaces = prevConfirmed;
+                        this.scanFaceUserEdits = prevUserEdits;
+                        return;
                     }
+                    this.scanConfirmedFaces = prevConfirmed;
+                    this.scanFaceUserEdits = prevUserEdits;
+                }
+                // Validation failed — keep review open so user can continue editing
+                const NAMES = {U:'黃',R:'橙',F:'藍',D:'白',L:'紅',B:'綠'};
+                const errMsg = v.errors.map(e => {
+                    const m = e.match(/^([URFDLB]) 貼紙數為 (\d+)/);
+                    if (m) return `${NAMES[m[1]]||m[1]}色有${m[2]}個（需9）`;
+                    if (e.includes('中心格')) return '有顏色面重複';
+                    if (e.includes('cubejs')) return '奇偶校驗錯誤（自動修復試過了仍無解，可能相鄰面交界貼紙弄反）';
+                    return e;
+                }).join('；');
+                const hint = document.getElementById('shot-review-hint');
+                if (hint) {
+                    hint.classList.add('active');
+                    hint.innerHTML = `<span style="color:#fca5a5">⚠ ${errMsg}，請修色後再確認</span>`;
                 }
             }
 
@@ -6562,14 +6592,15 @@
                         this.closeScanner();
                         await this._finishScanAndSolve(state, 'six-face');
                     } else {
-                        // 若只有 cubejs 奇偶校驗錯誤（各色數量正確），嘗試自動旋轉各面修正
+                        // 若只有 cubejs 奇偶校驗錯誤（各色數量正確），嘗試深度自動修復
+                        // 包含：面旋轉 + 貼紙對調 + 顏色平衡
                         const onlyParity = v.errors.length > 0 &&
                             v.errors.every(e => e.includes('cubejs') || e.includes('忠實解析'));
                         if (onlyParity) {
-                            const fixedState = this._tryAutoOrientFaces();
+                            const fixedState = this._tryDeepAutoFix();
                             if (fixedState) {
                                 this.closeScanner();
-                                await this._finishScanAndSolve(fixedState, 'six-face-auto-orient');
+                                await this._finishScanAndSolve(fixedState, 'six-face-deep-fix');
                                 return;
                             }
                         }
@@ -6675,6 +6706,77 @@
                         }
                     } catch (e) { /* 無效組合，繼續 */ }
                 }
+                return null;
+            }
+
+            // 對調搜尋：嘗試所有「未鎖定貼紙」的兩兩交換，看是否能通過 cubejs 驗證
+            // 適用於：使用者手動修色後造成兩個位置標記反了的情境
+            //   例：F[0] 應為 L 結果填了 F；L[2] 應為 F 結果填了 L
+            //   greedy 平衡無法處理，但對調搜尋可以
+            _trySwapPairs() {
+                if (!window.Cube) return null;
+                const labels = STATE_FACE_ORDER.flatMap(f => this.scanConfirmedFaces[f] || Array(9).fill(f));
+                if (labels.length !== 54) return null;
+                const userEdited = new Array(54).fill(false);
+                STATE_FACE_ORDER.forEach((f, fi) => {
+                    const edits = (this.scanFaceUserEdits || {})[f] || [];
+                    for (let i = 0; i < 9; i++) if (edits[i]) userEdited[fi * 9 + i] = true;
+                });
+                const CENTERS = new Set([4, 13, 22, 31, 40, 49]);
+                const isLocked = pos => CENTERS.has(pos) || userEdited[pos];
+
+                for (let i = 0; i < 54; i++) {
+                    if (isLocked(i)) continue;
+                    for (let j = i + 1; j < 54; j++) {
+                        if (isLocked(j)) continue;
+                        if (labels[i] === labels[j]) continue;
+                        // 嘗試 swap
+                        [labels[i], labels[j]] = [labels[j], labels[i]];
+                        const candidate = labels.join('');
+                        try {
+                            const cube = Cube.fromString(candidate);
+                            if (cube.asString() === candidate) {
+                                STATE_FACE_ORDER.forEach((f, fi) => {
+                                    this.scanConfirmedFaces[f] = labels.slice(fi * 9, fi * 9 + 9);
+                                });
+                                return candidate;
+                            }
+                        } catch (e) { /* 不合法，繼續 */ }
+                        // 還原
+                        [labels[i], labels[j]] = [labels[j], labels[i]];
+                    }
+                }
+                return null;
+            }
+
+            // 深度自動修復：依序嘗試所有可程式化的修復策略
+            // 1. 面方向旋轉（4096 種）
+            // 2. 兩兩貼紙對調（~1400 對，跳過 user-edited 與中心）
+            // 3. greedy 顏色數量平衡（既有 _tryAutoBalance）
+            // 找到就回傳，全部失敗才回 null
+            _tryDeepAutoFix() {
+                console.log('[FIX] 開始深度自動修復...');
+                const t0 = performance.now();
+
+                let fixed = this._tryAutoOrientFaces();
+                if (fixed) {
+                    console.log(`[FIX] ✓ 面旋轉成功 (${(performance.now() - t0).toFixed(0)}ms)`);
+                    return fixed;
+                }
+
+                fixed = this._trySwapPairs();
+                if (fixed) {
+                    console.log(`[FIX] ✓ 貼紙對調成功 (${(performance.now() - t0).toFixed(0)}ms)`);
+                    return fixed;
+                }
+
+                fixed = this._tryAutoBalance();
+                if (fixed) {
+                    console.log(`[FIX] ✓ 顏色平衡成功 (${(performance.now() - t0).toFixed(0)}ms)`);
+                    return fixed;
+                }
+
+                console.log(`[FIX] ✗ 全部策略失敗 (${(performance.now() - t0).toFixed(0)}ms)`);
                 return null;
             }
 
@@ -7161,21 +7263,22 @@
 
             // User-triggered auto-balance (not called automatically).
             async tryManualBalance() {
-                const balanced = this._tryAutoBalance();
-                if (!balanced) {
-                    const hint = document.getElementById('face-edit-hint');
-                    if (hint) { hint.textContent = '⚠ 無法自動平衡，請手動修色'; hint.style.color = '#fca5a5'; }
-                    return;
+                // 深度修復：面旋轉 + 貼紙對調 + 顏色平衡，三招都試
+                const fixed = this._tryDeepAutoFix();
+                if (fixed) {
+                    const v = StateValidator3.validate(fixed);
+                    if (v.ok) {
+                        const balRow = document.getElementById('face-edit-balance-row');
+                        if (balRow) balRow.style.display = 'none';
+                        this.closeScanner();
+                        await this._finishScanAndSolve(fixed, 'deep-auto-fix');
+                        return;
+                    }
                 }
-                const v = StateValidator3.validate(balanced);
-                if (v.ok) {
-                    const balRow = document.getElementById('face-edit-balance-row');
-                    if (balRow) balRow.style.display = 'none';
-                    this.closeScanner();
-                    await this._finishScanAndSolve(balanced, 'manual-balance');
-                } else {
-                    const hint = document.getElementById('face-edit-hint');
-                    if (hint) { hint.textContent = '⚠ 自動平衡後仍有誤，請手動修色'; hint.style.color = '#fca5a5'; }
+                const hint = document.getElementById('face-edit-hint');
+                if (hint) {
+                    hint.innerHTML = '⚠ 自動修復失敗。<b>提示</b>：可能是相鄰兩面交界處的貼紙顏色弄反了，或某個角塊三色搭配不對。<br>建議檢查中心格鄰近的貼紙是否符合實體方塊。';
+                    hint.style.color = '#fca5a5';
                 }
             }
 
@@ -8447,6 +8550,64 @@
                         };
                         this._reclassifyPanelFromCenter(fakePanel, 'U');
                         this.assertTest(fakePanel.classifiedColors.length === 9, '分類後仍應有 9 格');
+                    });
+
+                    // ── T7-5b：_trySwapPairs（兩拍貼紙位置弄反）
+                    run('T7-5b _trySwapPairs 對調修復', () => {
+                        if (!window.Cube) throw new Error('cubejs 未載入');
+                        const SOLVED = STATE_FACE_ORDER.map(f => f.repeat(9)).join('');
+                        const savedConfirmed = this.scanConfirmedFaces;
+                        const savedEdits = this.scanFaceUserEdits;
+                        try {
+                            // 模擬：使用者把 F[0] 跟 L[2] 寫反
+                            // 注意：必須是兩個未鎖定貼紙之間的 swap，且 swap 後必須是合法狀態
+                            const scrambled = {};
+                            STATE_FACE_ORDER.forEach((f, i) => {
+                                scrambled[f] = SOLVED.slice(i*9, i*9+9).split('');
+                            });
+                            // F[0]='L', L[2]='F'（人為對調）
+                            scrambled.F[0] = 'L';
+                            scrambled.L[2] = 'F';
+                            this.scanConfirmedFaces = scrambled;
+                            this.scanFaceUserEdits = {};
+                            const fixed = this._trySwapPairs();
+                            this.assertTest(fixed !== null, '_trySwapPairs 應能修復簡單對調 (F[0] ↔ L[2])');
+                            // 驗證修復後 cubejs 通過
+                            const cube = window.Cube.fromString(fixed);
+                            this.assertTest(cube.asString() === fixed, '修復後狀態應通過 cubejs 驗證');
+                        } finally {
+                            this.scanConfirmedFaces = savedConfirmed;
+                            this.scanFaceUserEdits = savedEdits;
+                        }
+                    });
+
+                    // ── T7-5c：_tryDeepAutoFix 整合（面旋轉 + 對調 + 平衡）
+                    run('T7-5c _tryDeepAutoFix 整合修復', () => {
+                        if (!window.Cube) throw new Error('cubejs 未載入');
+                        const ROT = [[0,1,2,3,4,5,6,7,8],[6,3,0,7,4,1,8,5,2],[8,7,6,5,4,3,2,1,0],[2,5,8,1,4,7,0,3,6]];
+                        const SOLVED = STATE_FACE_ORDER.map(f => f.repeat(9)).join('');
+                        const savedConfirmed = this.scanConfirmedFaces;
+                        const savedEdits = this.scanFaceUserEdits;
+                        try {
+                            // 案例 1：純面旋轉錯誤（U 面旋轉了 90°）
+                            const c1 = {};
+                            STATE_FACE_ORDER.forEach((f, i) => { c1[f] = SOLVED.slice(i*9, i*9+9).split(''); });
+                            c1.U = ROT[1].map(i => c1.U[i]);
+                            this.scanConfirmedFaces = c1;
+                            this.scanFaceUserEdits = {};
+                            this.assertTest(this._tryDeepAutoFix() !== null, '案例1：U面旋轉90° 應修復');
+
+                            // 案例 2：兩格貼紙位置弄反
+                            const c2 = {};
+                            STATE_FACE_ORDER.forEach((f, i) => { c2[f] = SOLVED.slice(i*9, i*9+9).split(''); });
+                            c2.F[0] = 'L'; c2.L[2] = 'F';
+                            this.scanConfirmedFaces = c2;
+                            this.scanFaceUserEdits = {};
+                            this.assertTest(this._tryDeepAutoFix() !== null, '案例2：兩格對調 應修復');
+                        } finally {
+                            this.scanConfirmedFaces = savedConfirmed;
+                            this.scanFaceUserEdits = savedEdits;
+                        }
                     });
 
                     // ── T7-6：ROT 保持中心格 (sanity check 配合 T7-2/T7-3)
