@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>魔術方塊掃描解題系統</title>
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#03110d">
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: "Noto Sans TC", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background:
+                radial-gradient(circle at 50% 36%, rgba(18, 83, 58, 0.28), rgba(4, 18, 14, 0.84) 46%, #020806 82%),
+                #020806;
+            color: #f9fafb;
+            display: grid;
+            place-items: center;
+            padding: 24px;
+        }
+        main {
+            width: min(920px, 100%);
+        }
+        h1 {
+            font-size: clamp(2rem, 6vw, 4rem);
+            margin: 0 0 12px;
+            letter-spacing: 0;
+        }
+        p {
+            color: #cbd5e1;
+            margin: 0 0 28px;
+            line-height: 1.7;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+        }
+        a, .pending {
+            min-height: 150px;
+            border: 1px solid rgba(255,255,255,0.16);
+            background: rgba(255,255,255,0.08);
+            color: inherit;
+            text-decoration: none;
+            padding: 22px;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+        a:hover {
+            border-color: rgba(255,255,255,0.42);
+            background: rgba(255,255,255,0.12);
+        }
+        .pending {
+            opacity: 0.55;
+        }
+        .size {
+            font-size: 2rem;
+            font-weight: 800;
+        }
+        .status {
+            color: #93c5fd;
+            font-size: 0.95rem;
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <h1>魔術方塊掃描解題系統</h1>
+        <p>3×3 已可使用：支援手動修色、逐面鏡頭掃描、Kociemba 解題與動畫引導。4×4 與 5×5 後續擴充。</p>
+        <div class="grid">
+            <a href="cube3x3.html">
+                <span class="size">3×3</span>
+                <span class="status">可使用</span>
+            </a>
+            <div class="pending">
+                <span class="size">4×4</span>
+                <span class="status">待 Phase 6</span>
+            </div>
+            <div class="pending">
+                <span class="size">5×5</span>
+                <span class="status">待 Phase 7</span>
+            </div>
+        </div>
+    </main>
+</body>
+<script>
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+        });
+    }
+</script>
+</html>

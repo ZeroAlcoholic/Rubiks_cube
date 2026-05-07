@@ -1,0 +1,43 @@
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# IDE / tooling
+.vscode/
+.idea/
+.claude/
+
+# Project work dirs
+backups/
+output/
+
+# Empty placeholders
+新增 文字文件.txt
+
+# Logs / temp
+*.log
+*.tmp
+
+# Env / secrets
+.env
+.env.*
+*.pat
+*.token
+secrets.txt
+.git-pat.txt
+
+# Sample photos (real phone shots, kept local only)
+resources/PXL_*.jpg
+resources/PXL_*.jpeg
+
+# Synthesized test images
+resources/test_cube_*.png
+resources/test_cube_*.jpg
+
+# Node (if any tooling appears later)
+node_modules/
+
+# Python (resources/ kept for photos)
+__pycache__/
+*.pyc
