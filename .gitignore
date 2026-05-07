@@ -35,6 +35,13 @@ resources/PXL_*.jpeg
 resources/test_cube_*.png
 resources/test_cube_*.jpg
 
+# Local-only test harnesses
+test_realphoto.html
+test_logic.js
+test_color_classifier.py
+test_synthetic_cube.py
+_patch_scan_review.py
+
 # Node (if any tooling appears later)
 node_modules/
 
