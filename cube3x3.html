@@ -646,6 +646,9 @@
                 <button class="btn" onclick="game.openScanner()">
                     <span>📷</span> 鏡頭掃描
                 </button>
+                <button class="btn" onclick="game.loadLastScannedState()" title="讀取上次掃描的狀態，可避免重新掃">
+                    <span>↻</span> 上次狀態
+                </button>
                 <button id="solve-btn" class="btn solve-btn" onclick="game.autoSolve()">
                     <span>🧠</span> <span id="solve-text">自動解題</span>
                 </button>
@@ -6193,7 +6196,7 @@
                 if (captureBtn) captureBtn.disabled = false;
             }
 
-            confirmShotReview() {
+            async confirmShotReview() {
                 if (!this.shotReviewCurrentPanels) return; // double-tap guard
                 // Build state from all edited panels (current shot + previous shots)
                 const allPanels = [...(this.shotReviewAllEdited || []), ...this.shotReviewCurrentPanels];
@@ -6210,8 +6213,7 @@
                     this._saveCalibEntries(this._collectFromShotPanels(this.shotReviewCurrentPanels));
                     this.exitShotReview(false);
                     this.closeScanner();
-                    this.setState(state);
-                    this.autoSolve();
+                    await this._finishScanAndSolve(state, 'two-shot');
                 } else {
                     // Validation failed — keep review open so user can continue editing
                     const NAMES = {U:'黃',R:'橙',F:'藍',D:'白',L:'紅',B:'綠'};
@@ -6234,8 +6236,7 @@
                 const v = StateValidator3.validate(state);
                 if (v.ok) {
                     this.closeScanner();
-                    this.setState(state);
-                    await this.autoSolve();
+                    await this._finishScanAndSolve(state, 'two-shot-fallback');
                 } else {
                     const hint = document.getElementById('shot-review-hint');
                     if (hint) {
@@ -6559,8 +6560,7 @@
                     const v = StateValidator3.validate(state);
                     if (v.ok) {
                         this.closeScanner();
-                        this.setState(state);
-                        await this.autoSolve();
+                        await this._finishScanAndSolve(state, 'six-face');
                     } else {
                         // 若只有 cubejs 奇偶校驗錯誤（各色數量正確），嘗試自動旋轉各面修正
                         const onlyParity = v.errors.length > 0 &&
@@ -6569,8 +6569,7 @@
                             const fixedState = this._tryAutoOrientFaces();
                             if (fixedState) {
                                 this.closeScanner();
-                                this.setState(fixedState);
-                                await this.autoSolve();
+                                await this._finishScanAndSolve(fixedState, 'six-face-auto-orient');
                                 return;
                             }
                         }
@@ -7173,8 +7172,7 @@
                     const balRow = document.getElementById('face-edit-balance-row');
                     if (balRow) balRow.style.display = 'none';
                     this.closeScanner();
-                    this.setState(balanced);
-                    await this.autoSolve();
+                    await this._finishScanAndSolve(balanced, 'manual-balance');
                 } else {
                     const hint = document.getElementById('face-edit-hint');
                     if (hint) { hint.textContent = '⚠ 自動平衡後仍有誤，請手動修色'; hint.style.color = '#fca5a5'; }
@@ -8182,6 +8180,53 @@
                 this.pauseGuideAutoPlay();
             }
 
+            // 集中所有「掃描完成 → 設狀態 → 自動解題」的入口，提供：
+            // 1. 診斷 log（可在 console 過濾 [SCAN]）
+            // 2. localStorage 持久化，掃描結果不會因為解題失敗而消失
+            // 3. autoSolve 失敗時把實際錯誤顯示給使用者（之前是 unhandled promise rejection 悄悄吃掉）
+            async _finishScanAndSolve(state, source) {
+                console.log(`[SCAN][${source}] state = ${state}`);
+                console.log(`[SCAN][${source}] facets = U:${state.slice(0,9)} R:${state.slice(9,18)} F:${state.slice(18,27)} D:${state.slice(27,36)} L:${state.slice(36,45)} B:${state.slice(45,54)}`);
+                try {
+                    localStorage.setItem('rubiks_last_scan', JSON.stringify({
+                        state, source, timestamp: Date.now()
+                    }));
+                } catch (e) { console.warn('[SCAN] localStorage 寫入失敗', e); }
+
+                this.setState(state);
+                console.log(`[SOLVE][${source}] setState 完成，準備呼叫 autoSolve...`);
+                try {
+                    await this.autoSolve();
+                    console.log(`[SOLVE][${source}] autoSolve 完成`);
+                } catch (error) {
+                    console.error(`[SOLVE][${source}] autoSolve 失敗:`, error);
+                    alert(`解題失敗：${error.message}\n\n你的掃描結果已保留在 localStorage（rubiks_last_scan），可隨時回讀。`);
+                }
+            }
+
+            // 讀回最後一次掃描的狀態（給診斷/重試用）
+            loadLastScannedState() {
+                try {
+                    const raw = localStorage.getItem('rubiks_last_scan');
+                    if (!raw) { alert('沒有上次掃描紀錄'); return; }
+                    const data = JSON.parse(raw);
+                    const ago = Math.round((Date.now() - data.timestamp) / 1000);
+                    const minutes = Math.floor(ago / 60);
+                    const ageStr = minutes > 0 ? `${minutes} 分${ago % 60} 秒前` : `${ago} 秒前`;
+                    const ok = confirm(
+                        `上次掃描狀態（${data.source}，${ageStr}）：\n\n` +
+                        `${data.state.match(/.{9}/g).map((f, i) => STATE_FACE_ORDER[i] + ': ' + f).join('\n')}\n\n` +
+                        `要套用到 3D 模型並開始解題嗎？`
+                    );
+                    if (ok) {
+                        console.log(`[SCAN][reload] state = ${data.state}`);
+                        this._finishScanAndSolve(data.state, 'reload');
+                    }
+                } catch (e) {
+                    alert('讀取失敗：' + e.message);
+                }
+            }
+
             async autoSolve() {
                 const solveBtnText = document.getElementById('solve-text');
                 if (this.isAnimating || this.isSolving) return;
@@ -8191,9 +8236,13 @@
                 document.getElementById('win-msg').style.opacity = '0';
 
                 try {
+                    console.log('[SOLVE] 當前狀態:', this.readCurrentState());
                     const solution = await this.buildSolutionForCurrentState(message => {
+                        console.log('[SOLVE] 進度:', message);
                         solveBtnText.innerText = message;
                     });
+                    console.log(`[SOLVE] 解法產生：${solution.moves.length} 步`,
+                        solution.moves.slice(0, 20).map(m => m.notation || m).join(' ') + (solution.moves.length > 20 ? '...' : ''));
 
                     if (solution.moves.length === 0) {
                         solveBtnText.innerText = "已完成";
@@ -8203,11 +8252,13 @@
 
                     this.startSolveGuide(solution.moves);
                     solveBtnText.innerText = `已載入 ${solution.moves.length} 步`;
+                    console.log('[SOLVE] 開始自動播放');
                     await this.toggleGuideAutoPlay();
+                    console.log('[SOLVE] 自動播放結束，已解狀態:', this.checkIsSolved(false));
                 } catch (error) {
-                    console.error('Solve failed:', error);
+                    console.error('[SOLVE] 失敗:', error);
                     solveBtnText.innerText = "解題失敗";
-                    alert(`解題失敗：${error.message}`);
+                    alert(`解題失敗：${error.message}\n\n（按 F12 開 console 看詳細訊息）`);
                 } finally {
                     this.isSolving = false;
                 }
