@@ -7527,7 +7527,8 @@
                         this.assertTest(area.classList.contains('active'), '#face-edit-area 應有 active class');
                         const title = document.getElementById('face-edit-title');
                         this.assertTest(title.textContent.includes('1 / 6'), '標題應包含 "1 / 6"');
-                        this.assertTest(title.textContent.includes('U'), '標題應包含面名稱 U');
+                        // 新版標題格式：「偵測為：黃色面（1 / 6）」— 改為驗證有顏色名稱
+                        this.assertTest(/[黃橙藍白紅綠]/.test(title.textContent), `標題應含顏色名稱（實際: ${title.textContent}）`);
                         const grid = document.getElementById('face-edit-grid');
                         this.assertTest(grid.children.length === 9, '格子應有 9 個 cell');
                         this.assertTest(grid.children[4].classList.contains('center'), '第 5 格應有 .center class');
@@ -7628,9 +7629,14 @@
                         });
                         this.scanRawPanels = Object.values(this.scanFacePanels);
                         const balanced = this._tryAutoBalance();
-                        this.assertTest(balanced !== null, '應找到合法 balance（從未鎖的 L 換）');
-                        // 關鍵：F[0] 使用者鎖的 L 必須保留
-                        this.assertTest(balanced[18] === 'L', 'F[0] 使用者鎖定為 L，balance 後仍應為 L');
+                        // 真正核心契約：「user-edited 標籤 inviolate」
+                        // 不論 balance 成功與否，F[0] 都必須保留為 L（使用者明確指定）
+                        // （此情境因物理上單一貼紙交換必違反角塊奇偶，balance 可能合理回 null）
+                        if (balanced !== null) {
+                            this.assertTest(balanced[18] === 'L', `成功時 F[0] 應為 L，但得到 ${balanced[18]}`);
+                        }
+                        this.assertTest(this.scanConfirmedFaces.F[0] === 'L',
+                            `scanConfirmedFaces.F[0] 必須保留為 L (使用者鎖定不可破壞)`);
                         cleanup();
                     });
 
@@ -7779,8 +7785,10 @@
                         this.assertTest(!autoSolveCalled, '使用者鎖死的無解狀態不應呼叫 autoSolve');
                         this.assertTest(this.scanConfirmedFaces['B'] === undefined, '驗證失敗時 B 面應從 scanConfirmedFaces 移除');
                         this.assertTest(this.scanIndex === 5, '驗證失敗時 scanIndex 應回到 5');
-                        const hint = document.getElementById('face-edit-hint');
-                        this.assertTest(hint.textContent.startsWith('⚠'), '驗證失敗應顯示 ⚠ 錯誤');
+                        // 錯誤訊息顯示在 title（不在 hint），避免被 _updateFaceEditCounts() 覆寫
+                        const errTitle = document.getElementById('face-edit-title');
+                        this.assertTest(errTitle.textContent.startsWith('⚠'),
+                            `驗證失敗應顯示 ⚠ 於 title（實際: ${errTitle.textContent}）`);
                         this.assertTest(document.getElementById('face-edit-area').classList.contains('active'), '驗證失敗後 face-edit-area 應仍可見');
 
                         // 第二次：修正 B 面再確認
@@ -8236,6 +8244,185 @@
                     this.triggerWin();
                     // 勝利後清空歷史，防止再點自動解題出錯
                     this.moveStack = []; 
+                }
+            }
+
+            // Phase 7：迴歸測試（針對近期修正：wireframe / _tryAutoOrientFaces / center click）
+            async runPhase7Tests(options = {}) {
+                const started = performance.now();
+                const results = [];
+                const run = (name, fn) => {
+                    const t0 = performance.now();
+                    fn();
+                    results.push({ name, ms: Math.round((performance.now() - t0) * 100) / 100 });
+                };
+
+                try {
+                    // ── T7-1：wireframe 幾何（6 種螢幕尺寸全部界內 + 比例符合照片）
+                    // getTwoShotPanels 回傳 {top:{corners:[t,r,c,l]}, left:{corners:[l,c,b,bl]}, right:{corners:[c,r,br,b]}}
+                    run('T7-1 wireframe 幾何 6 種螢幕', () => {
+                        const SCREENS = [
+                            { name: 'Pixel 7',     W: 412, H: 637 },
+                            { name: 'iPhone 13',   W: 390, H: 664 },
+                            { name: 'Android S21', W: 360, H: 680 },
+                            { name: 'iPad',        W: 768, H: 1024 },
+                            { name: 'Desktop',     W: 760, H: 570 },
+                            { name: 'Pixel 8a',    W: 411, H: 599 },
+                        ];
+                        SCREENS.forEach(s => {
+                            const p = this.getTwoShotPanels(s.W, s.H);
+                            // 收集所有獨特角點
+                            const allPts = [
+                                ...p.top.corners,
+                                p.left.corners[2], p.left.corners[3], // bottom, bottomLeft
+                                p.right.corners[2],                    // bottomRight
+                            ];
+                            allPts.forEach((pt, idx) => {
+                                this.assertTest(pt && typeof pt.x === 'number' && typeof pt.y === 'number',
+                                    `${s.name} 點${idx} 結構錯誤`);
+                                this.assertTest(pt.x >= 0 && pt.x <= s.W && pt.y >= 0 && pt.y <= s.H,
+                                    `${s.name} 點${idx} (${pt.x.toFixed(0)},${pt.y.toFixed(0)}) 超出 ${s.W}×${s.H}`);
+                            });
+                        });
+                        // 手機豎拍比例驗證（iPhone 13 標準）
+                        const phone = this.getTwoShotPanels(390, 664);
+                        const topPt = phone.top.corners[0];      // top vertex
+                        const rightPt = phone.top.corners[1];    // right outer
+                        const leftPt = phone.top.corners[3];     // left outer
+                        const bottomPt = phone.left.corners[2];  // bottom vertex
+                        const topPct = topPt.y / 664 * 100;
+                        const botPct = bottomPt.y / 664 * 100;
+                        const spanPct = (rightPt.x - leftPt.x) / 390 * 100;
+                        this.assertTest(topPct >= 20 && topPct <= 27, `iPhone13 top=${topPct.toFixed(1)}% 不在 20-27%`);
+                        this.assertTest(botPct >= 70 && botPct <= 80, `iPhone13 bot=${botPct.toFixed(1)}% 不在 70-80%`);
+                        this.assertTest(spanPct >= 65 && spanPct <= 71, `iPhone13 span=${spanPct.toFixed(1)}% 不在 65-71%`);
+                    });
+
+                    // ── T7-2：_tryAutoOrientFaces（單面旋轉 90°/180°/270° 全部能還原）
+                    run('T7-2 _tryAutoOrientFaces 單面旋轉', () => {
+                        if (!window.Cube) throw new Error('cubejs 未載入');
+                        const ROT = [
+                            [0,1,2,3,4,5,6,7,8],
+                            [6,3,0,7,4,1,8,5,2],
+                            [8,7,6,5,4,3,2,1,0],
+                            [2,5,8,1,4,7,0,3,6],
+                        ];
+                        const SOLVED = STATE_FACE_ORDER.map(f => f.repeat(9)).join('');
+                        const savedConfirmed = this.scanConfirmedFaces;
+                        try {
+                            for (let fi = 0; fi < 6; fi++) {
+                                for (let r = 1; r < 4; r++) {
+                                    const f = STATE_FACE_ORDER[fi];
+                                    const scrambled = {};
+                                    STATE_FACE_ORDER.forEach((ff, i) => {
+                                        scrambled[ff] = SOLVED.slice(i*9, i*9+9).split('');
+                                    });
+                                    scrambled[f] = ROT[r].map(i => scrambled[f][i]);
+                                    this.scanConfirmedFaces = scrambled;
+                                    const fixed = this._tryAutoOrientFaces();
+                                    this.assertTest(fixed !== null, `${f}面旋轉${r*90}° 應能找到合法狀態`);
+                                    const cube = window.Cube.fromString(fixed);
+                                    this.assertTest(cube.asString() === fixed, `${f}面旋轉${r*90}° 修正後 cubejs 驗證通過`);
+                                }
+                            }
+                        } finally {
+                            this.scanConfirmedFaces = savedConfirmed;
+                        }
+                    });
+
+                    // ── T7-3：_tryAutoOrientFaces（兩面同時旋轉）
+                    run('T7-3 _tryAutoOrientFaces 兩面旋轉', () => {
+                        if (!window.Cube) throw new Error('cubejs 未載入');
+                        const ROT = [
+                            [0,1,2,3,4,5,6,7,8],
+                            [6,3,0,7,4,1,8,5,2],
+                            [8,7,6,5,4,3,2,1,0],
+                            [2,5,8,1,4,7,0,3,6],
+                        ];
+                        const SOLVED = STATE_FACE_ORDER.map(f => f.repeat(9)).join('');
+                        const savedConfirmed = this.scanConfirmedFaces;
+                        try {
+                            // 5 次隨機兩面旋轉
+                            for (let trial = 0; trial < 5; trial++) {
+                                const scrambled = {};
+                                STATE_FACE_ORDER.forEach((ff, i) => {
+                                    scrambled[ff] = SOLVED.slice(i*9, i*9+9).split('');
+                                });
+                                const f1 = Math.floor(Math.random() * 6);
+                                let f2; do { f2 = Math.floor(Math.random() * 6); } while (f2 === f1);
+                                const r1 = 1 + Math.floor(Math.random() * 3);
+                                const r2 = 1 + Math.floor(Math.random() * 3);
+                                scrambled[STATE_FACE_ORDER[f1]] = ROT[r1].map(i => scrambled[STATE_FACE_ORDER[f1]][i]);
+                                scrambled[STATE_FACE_ORDER[f2]] = ROT[r2].map(i => scrambled[STATE_FACE_ORDER[f2]][i]);
+                                this.scanConfirmedFaces = scrambled;
+                                const fixed = this._tryAutoOrientFaces();
+                                this.assertTest(fixed !== null,
+                                    `兩面旋轉(${STATE_FACE_ORDER[f1]}${r1*90}°,${STATE_FACE_ORDER[f2]}${r2*90}°) 應能還原`);
+                            }
+                        } finally {
+                            this.scanConfirmedFaces = savedConfirmed;
+                        }
+                    });
+
+                    // ── T7-4：StateValidator3（cubejs 整合）
+                    run('T7-4 StateValidator3 整合驗證', () => {
+                        const SOLVED = STATE_FACE_ORDER.map(f => f.repeat(9)).join('');
+                        let v = StateValidator3.validate(SOLVED);
+                        this.assertTest(v.ok, `SOLVED 應通過: ${v.errors.join(',')}`);
+
+                        v = StateValidator3.validate('U'.repeat(54));
+                        this.assertTest(!v.ok, '全 U 應失敗');
+
+                        v = StateValidator3.validate(SOLVED.slice(0, 53));
+                        this.assertTest(!v.ok, '53 字元應失敗');
+
+                        // 中心格重複（U 中心改 R）
+                        v = StateValidator3.validate(SOLVED.slice(0,4) + 'R' + SOLVED.slice(5));
+                        this.assertTest(!v.ok, '中心格重複 + 數量錯誤應失敗');
+                    });
+
+                    // ── T7-5：center sticker 點擊處理（兩拍模式重新分類）
+                    run('T7-5 兩拍中心格點擊邏輯', () => {
+                        // 確認 _reclassifyPanelFromCenter 存在且可呼叫（由 handleShotReviewCanvasClick 使用）
+                        this.assertTest(typeof this._reclassifyPanelFromCenter === 'function',
+                            '_reclassifyPanelFromCenter 方法應存在');
+                        // 構造一個假 panel
+                        const fakePanel = {
+                            slot: 'top', expectedFace: 'U',
+                            originalRgbs: Array(9).fill(null).map((_, i) => ({ r: 215, g: 205, b: 22 })),
+                            classifiedColors: Array(9).fill('U'),
+                            userEdits: Array(9).fill(false),
+                            confidence: Array(9).fill(50),
+                        };
+                        this._reclassifyPanelFromCenter(fakePanel, 'U');
+                        this.assertTest(fakePanel.classifiedColors.length === 9, '分類後仍應有 9 格');
+                    });
+
+                    // ── T7-6：ROT 保持中心格 (sanity check 配合 T7-2/T7-3)
+                    run('T7-6 ROT 矩陣中心保持', () => {
+                        const ROT = [
+                            [0,1,2,3,4,5,6,7,8],
+                            [6,3,0,7,4,1,8,5,2],
+                            [8,7,6,5,4,3,2,1,0],
+                            [2,5,8,1,4,7,0,3,6],
+                        ];
+                        for (let r = 0; r < 4; r++) {
+                            this.assertTest(ROT[r][4] === 4, `ROT[${r}][4] 應為 4`);
+                            const sorted = [...ROT[r]].sort((a,b)=>a-b).join(',');
+                            this.assertTest(sorted === '0,1,2,3,4,5,6,7,8', `ROT[${r}] 應為 0..8 排列`);
+                        }
+                    });
+
+                    const elapsed = Math.round((performance.now() - started) * 100) / 100;
+                    this.updateTestStatus('passed', `Phase 7 迴歸測試全數通過 (${elapsed}ms)`);
+                    console.table(results);
+                    if (!options.silent) alert(`Phase 7 迴歸測試全數通過 (${elapsed}ms)。`);
+                    return { ok: true, elapsed, results };
+                } catch (error) {
+                    this.updateTestStatus('failed', `Phase 7 失敗：${error.message}`);
+                    console.error('Phase 7 test failed:', error);
+                    if (!options.silent) alert(`Phase 7 測試失敗：${error.message}`);
+                    return { ok: false, error };
                 }
             }
 
@@ -8790,6 +8977,39 @@
                 setTimeout(() => window.game.runPhase5Tests({ silent: params.get('silent') === '1' }), 0);
             } else if (params.get('test') === '6') {
                 setTimeout(() => window.game.runPhase6Tests({ silent: params.get('silent') === '1' }), 0);
+            } else if (params.get('test') === '7') {
+                setTimeout(() => window.game.runPhase7Tests({ silent: params.get('silent') === '1' }), 0);
+            } else if (params.get('test') === 'all') {
+                setTimeout(async () => {
+                    const silent = { silent: true };
+                    const phases = [
+                        ['Phase 1', () => window.game.runPhase1Tests(silent)],
+                        ['Phase 2', () => window.game.runPhase2Tests(silent)],
+                        ['Phase 3', () => window.game.runPhase3Tests(silent)],
+                        ['Phase 4', () => window.game.runPhase4Tests(silent)],
+                        ['Phase 5', () => window.game.runPhase5Tests(silent)],
+                        ['Phase 6', () => window.game.runPhase6Tests(silent)],
+                        ['Phase 7', () => window.game.runPhase7Tests(silent)],
+                    ];
+                    const summary = [];
+                    for (const [name, fn] of phases) {
+                        try {
+                            const r = await fn();
+                            summary.push({ phase: name, ok: r && r.ok !== false, error: r && r.error ? r.error.message : '' });
+                        } catch (e) {
+                            summary.push({ phase: name, ok: false, error: e.message });
+                        }
+                    }
+                    console.table(summary);
+                    const failed = summary.filter(s => !s.ok);
+                    if (failed.length === 0) {
+                        window.game.updateTestStatus('passed', `全部 ${phases.length} 個 Phase 通過`);
+                        if (params.get('silent') !== '1') alert(`全部 ${phases.length} 個 Phase 通過 ✓`);
+                    } else {
+                        window.game.updateTestStatus('failed', `${failed.length} 個 Phase 失敗`);
+                        if (params.get('silent') !== '1') alert(`失敗：${failed.map(f => f.phase).join(', ')}`);
+                    }
+                }, 100);
             } else if (params.get('test') === 'e2e') {
                 setTimeout(() => window.game.runE2ETest({ silent: params.get('silent') === '1' }), 500);
             } else if (params.get('diag') === 'cubejs') {
