@@ -6722,6 +6722,71 @@
                 return null;
             }
 
+            // 整體方塊朝向搜尋：嘗試 48 種立方體朝向重新分配 + 每個再嘗試 4096 種面內旋轉
+            // 適用情境：使用者拿方塊的方向不是標準 URFDLB（例如把橙色朝上而不是黃色朝上）
+            //   結果是六個中心顏色都對但 cubejs 認為角塊組合不合法
+            //   需要把整顆方塊「旋轉」到標準朝向才能通過驗證
+            _tryCubeOrientations() {
+                if (!window.Cube) return null;
+                const FACES = ['U', 'R', 'F', 'D', 'L', 'B'];
+                const opposites = {U:'D', R:'L', F:'B', D:'U', L:'R', B:'F'};
+
+                // 生成 48 種「面標籤指派」（其中 24 種為合法立方體旋轉，另 24 種為鏡射；
+                // 鏡射版會被 cubejs 自動拒絕，不影響正確性，只是多花一點時間）
+                const orientations = [];
+                for (const newU of FACES) {
+                    const newD = opposites[newU];
+                    const sides = FACES.filter(f => f !== newU && f !== newD);
+                    for (const newF of sides) {
+                        const newB = opposites[newF];
+                        const rest = sides.filter(f => f !== newF && f !== newB);
+                        for (const newR of rest) {
+                            const newL = opposites[newR];
+                            orientations.push({ U: newU, R: newR, F: newF, D: newD, L: newL, B: newB });
+                        }
+                    }
+                }
+
+                const savedFaces = {};
+                FACES.forEach(f => savedFaces[f] = [...(this.scanConfirmedFaces[f] || [])]);
+
+                // 跳過第一個（identity）— 如果 identity 能通過，前面 _tryAutoOrientFaces 已經試過了
+                for (let oi = 0; oi < orientations.length; oi++) {
+                    const orient = orientations[oi];
+                    const isIdentity = FACES.every(f => orient[f] === f);
+                    if (isIdentity) continue;
+
+                    // 反查表：原本標籤 X 在新朝向下變成什麼
+                    const inverseOrient = {};
+                    FACES.forEach(f => { inverseOrient[orient[f]] = f; });
+
+                    // 重組 scanConfirmedFaces：位置 f 現在裝的是原本位置 orient[f] 的資料
+                    // 同時把 sticker 字母也重新標籤
+                    const newFaces = {};
+                    FACES.forEach(f => {
+                        const original = savedFaces[orient[f]];
+                        if (!original || original.length !== 9) {
+                            newFaces[f] = null;
+                            return;
+                        }
+                        newFaces[f] = original.map(letter => inverseOrient[letter] || letter);
+                    });
+                    if (FACES.some(f => !newFaces[f])) continue;
+
+                    // 暫時套用此朝向，跑 4096 面內旋轉
+                    this.scanConfirmedFaces = newFaces;
+                    const fixed = this._tryAutoOrientFaces();
+                    if (fixed) {
+                        // 找到了，scanConfirmedFaces 已被 _tryAutoOrientFaces 內部修正
+                        return fixed;
+                    }
+                }
+
+                // 全部失敗 — 還原
+                this.scanConfirmedFaces = savedFaces;
+                return null;
+            }
+
             // 對調搜尋：嘗試所有「未鎖定貼紙」的兩兩交換，看是否能通過 cubejs 驗證
             // 適用於：使用者手動修色後造成兩個位置標記反了的情境
             //   例：F[0] 應為 L 結果填了 F；L[2] 應為 F 結果填了 L
@@ -6763,9 +6828,10 @@
             }
 
             // 深度自動修復：依序嘗試所有可程式化的修復策略
-            // 1. 面方向旋轉（4096 種）
-            // 2. 兩兩貼紙對調（~1400 對，跳過 user-edited 與中心）
-            // 3. greedy 顏色數量平衡（既有 _tryAutoBalance）
+            // 1. 面方向旋轉（4096 種）— 處理單面旋轉錯誤
+            // 2. 兩兩貼紙對調（~1400 對）— 處理使用者修色時手抖弄反兩格
+            // 3. greedy 顏色數量平衡 — 處理多格輕微辨識錯誤
+            // 4. 整體方塊朝向重新分配（48 × 4096）— 處理使用者持方塊方向非 URFDLB 標準
             // 找到就回傳，全部失敗才回 null
             _tryDeepAutoFix() {
                 console.log('[FIX] 開始深度自動修復...');
@@ -6786,6 +6852,14 @@
                 fixed = this._tryAutoBalance();
                 if (fixed) {
                     console.log(`[FIX] ✓ 顏色平衡成功 (${(performance.now() - t0).toFixed(0)}ms)`);
+                    return fixed;
+                }
+
+                // 最後手段：整體方塊朝向重分配（最慢，~3-6 秒）
+                console.log('[FIX] 嘗試 48 種方塊朝向重分配...');
+                fixed = this._tryCubeOrientations();
+                if (fixed) {
+                    console.log(`[FIX] ✓ 方塊朝向重分配成功 (${(performance.now() - t0).toFixed(0)}ms)`);
                     return fixed;
                 }
 
@@ -8617,6 +8691,41 @@
                             this.scanConfirmedFaces = c2;
                             this.scanFaceUserEdits = {};
                             this.assertTest(this._tryDeepAutoFix() !== null, '案例2：兩格對調 應修復');
+                        } finally {
+                            this.scanConfirmedFaces = savedConfirmed;
+                            this.scanFaceUserEdits = savedEdits;
+                        }
+                    });
+
+                    // ── T7-5d：_tryCubeOrientations（整體朝向重分配）
+                    run('T7-5d 整體方塊朝向重分配', () => {
+                        if (!window.Cube) throw new Error('cubejs 未載入');
+                        const SOLVED = STATE_FACE_ORDER.map(f => f.repeat(9)).join('');
+                        const savedConfirmed = this.scanConfirmedFaces;
+                        const savedEdits = this.scanFaceUserEdits;
+                        try {
+                            // 模擬「使用者把方塊轉了 90° 拍」：原本 U 的資料被當成 R，等等
+                            // 構造方式：取已解狀態，把 U/R/F/D/L/B 重新排列成 F/U/R/B/D/L
+                            // （這是 cube y' 旋轉後的狀態）
+                            // 然後也把貼紙字母對應地改寫
+                            const FACES = ['U','R','F','D','L','B'];
+                            // y' rotation: F is now where R was. Mapping: oldR→newF, oldF→newL, oldL→newB, oldB→newR
+                            const rotMap = {U:'U', R:'F', F:'L', D:'D', L:'B', B:'R'};  // newPos → oldPos
+                            const inverse = {};
+                            FACES.forEach(f => inverse[rotMap[f]] = f);
+                            const newFaces = {};
+                            FACES.forEach(f => {
+                                const orig = SOLVED.slice(FACES.indexOf(rotMap[f])*9, FACES.indexOf(rotMap[f])*9+9).split('');
+                                newFaces[f] = orig.map(c => inverse[c]);
+                            });
+                            this.scanConfirmedFaces = newFaces;
+                            this.scanFaceUserEdits = {};
+                            // 直接 _tryAutoOrientFaces 應該不夠（因為標籤錯誤）
+                            // _tryCubeOrientations 才能修
+                            const fixed = this._tryCubeOrientations();
+                            this.assertTest(fixed !== null, '_tryCubeOrientations 應能修復整體朝向錯誤');
+                            const cube = window.Cube.fromString(fixed);
+                            this.assertTest(cube.asString() === fixed, '修復後 cubejs 驗證通過');
                         } finally {
                             this.scanConfirmedFaces = savedConfirmed;
                             this.scanFaceUserEdits = savedEdits;
