@@ -6522,7 +6522,8 @@
             }
 
             async confirmFaceEdit() {
-                if (!this.faceEditState || !this.pendingFacePanel) return;
+                if (!this.faceEditState || !this.pendingFacePanel || this._confirmingFace) return;
+                this._confirmingFace = true;
                 // FREE-ORDER: slot comes from auto-detected face (set in showFaceEditReview / _changeFaceIdentity)
                 const slot = this.pendingFacePanel.slot;
                 if (!slot || !STATE_FACE_ORDER.includes(slot)) return;
@@ -6601,6 +6602,7 @@
                         const balRow = document.getElementById('face-edit-balance-row');
                         if (balRow) balRow.style.display = 'flex';
                         this._renderFaceEditGrid(); // shows per-color counts in hint
+                        this._confirmingFace = false; // allow re-confirm after user fixes errors
                     }
                 } else {
                     // Clear capture lock so auto-capture can trigger for the next face
@@ -6622,6 +6624,7 @@
                     if (video) video.play().catch(() => {});
                     this.drawScannerOverlayLoop();
                 }
+                this._confirmingFace = false;
             }
 
             // Go back to the previously-confirmed face in six-face mode.
@@ -8353,15 +8356,18 @@
                 this.isGuideAutoPlaying = true;
                 this.isSolving = true; // block drag + enable fast animation during playback
                 this.updateSolveGuide();
-                while (this.isGuideAutoPlaying && this.guideIndex < this.guideMoves.length) {
-                    const moved = await this.nextGuideStep(true);
-                    if (!moved) break;
-                    if (this.isGuideAutoPlaying && this.guideIndex < this.guideMoves.length) {
-                        await new Promise(resolve => setTimeout(resolve, this.guideDelayMs));
+                try {
+                    while (this.isGuideAutoPlaying && this.guideIndex < this.guideMoves.length) {
+                        const moved = await this.nextGuideStep(true);
+                        if (!moved) break;
+                        if (this.isGuideAutoPlaying && this.guideIndex < this.guideMoves.length) {
+                            await new Promise(resolve => setTimeout(resolve, this.guideDelayMs));
+                        }
                     }
+                } finally {
+                    this.isSolving = false; // always restore — even if nextGuideStep throws
+                    this.pauseGuideAutoPlay();
                 }
-                this.isSolving = false; // allow drag again after pause or finish
-                this.pauseGuideAutoPlay();
             }
 
             // 集中所有「掃描完成 → 設狀態 → 自動解題」的入口，提供：
@@ -8377,13 +8383,13 @@
                     }));
                 } catch (e) { console.warn('[SCAN] localStorage 寫入失敗', e); }
 
-                this.setState(state);
-                console.log(`[SOLVE][${source}] setState 完成，準備呼叫 autoSolve...`);
                 try {
+                    this.setState(state);
+                    console.log(`[SOLVE][${source}] setState 完成，準備呼叫 autoSolve...`);
                     await this.autoSolve();
                     console.log(`[SOLVE][${source}] autoSolve 完成`);
                 } catch (error) {
-                    console.error(`[SOLVE][${source}] autoSolve 失敗:`, error);
+                    console.error(`[SOLVE][${source}] 失敗:`, error);
                     alert(`解題失敗：${error.message}\n\n你的掃描結果已保留在 localStorage（rubiks_last_scan），可隨時回讀。`);
                 }
             }
