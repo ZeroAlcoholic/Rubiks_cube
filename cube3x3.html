@@ -185,6 +185,11 @@
         }
         .guide-progress { flex: 1; color: #d1fae5; font-size: 0.95rem; }
         .guide-controls { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+        .guide-footer { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+        .guide-speed-label { font-size: 0.75rem; color: rgba(255,255,255,0.4); white-space: nowrap; }
+        .guide-speed-btn { font-size: 0.75rem !important; padding: 3px 11px !important; opacity: 0.45; transition: opacity 0.15s; }
+        .guide-speed-btn.active { opacity: 1; border-color: rgba(134,239,172,0.55) !important; color: #86efac !important; }
+        .guide-close-btn { margin-left: auto; font-size: 0.78rem; opacity: 0.55; }
         .scanner-view {
             position: relative;
             width: 100%;
@@ -667,10 +672,16 @@
             <div id="guide-progress" class="guide-progress">尚未載入解法</div>
         </div>
         <div class="guide-controls">
-            <button class="btn" onclick="game.previousGuideStep()">上一步</button>
-            <button id="guide-play-btn" class="btn solve-btn" onclick="game.toggleGuideAutoPlay()">自動播放</button>
-            <button class="btn" onclick="game.nextGuideStep()">下一步</button>
-            <button class="btn" onclick="game.closeSolveGuide()">關閉</button>
+            <button class="btn" onclick="game.previousGuideStep()">⏮ 上一步</button>
+            <button id="guide-play-btn" class="btn solve-btn" onclick="game.toggleGuideAutoPlay()">▶ 開始解題</button>
+            <button class="btn" onclick="game.nextGuideStep()">⏭ 下一步</button>
+        </div>
+        <div class="guide-footer">
+            <span class="guide-speed-label">速度：</span>
+            <button id="guide-speed-slow"   class="btn guide-speed-btn" onclick="game.setGuideSpeed('slow')">慢</button>
+            <button id="guide-speed-normal" class="btn guide-speed-btn active" onclick="game.setGuideSpeed('normal')">正常</button>
+            <button id="guide-speed-fast"   class="btn guide-speed-btn" onclick="game.setGuideSpeed('fast')">快</button>
+            <button class="btn guide-close-btn" onclick="game.closeSolveGuide()">✕ 關閉</button>
         </div>
     </div>
     <div id="state-editor" class="panel hidden">
@@ -4129,7 +4140,8 @@
                 this.guideIndex = 0;
                 this.executedGuideMoves = [];
                 this.isGuideAutoPlaying = false;
-                this.guideDelayMs = 1500;
+                this.guideDelayMs = 600;
+                this.guideAnimMs = 180;
                 this.scannerMode = 'two-shot';
                 this.scanFaces = ['U', 'R', 'F', 'D', 'L', 'B'];
                 this.pendingFacePanel = null;
@@ -8146,7 +8158,7 @@
                 activeCubes.forEach(cube => this.pivot.attach(cube));
 
                 if (animate) {
-                    const duration = this.isSolving ? 150 : 250; // 解題時更快
+                    const duration = this.isSolving ? (this.guideAnimMs || 150) : 250;
                     const startAuth = performance.now();
                     
                     const animateRotation = (time) => {
@@ -8341,15 +8353,33 @@
                 const progress = document.getElementById('guide-progress');
                 const playBtn = document.getElementById('guide-play-btn');
                 if (!notation || !progress || !playBtn) return;
+
+                const done = this.guideIndex >= this.guideMoves.length && this.guideMoves.length > 0;
+                const notStarted = this.guideIndex === 0 && (this.executedGuideMoves || []).length === 0;
+
                 if (this.guideMoves.length === 0) {
                     notation.innerText = '-';
-                    progress.innerText = '已完成';
+                    progress.innerText = '尚未載入解法';
+                } else if (done) {
+                    notation.innerText = '✓';
+                    progress.innerText = '解題完成！';
                 } else {
                     const current = this.guideMoves[this.guideIndex];
-                    notation.innerText = current ? current.notation : '✓';
-                    progress.innerText = `${Math.min(this.guideIndex + 1, this.guideMoves.length)} / ${this.guideMoves.length}`;
+                    notation.innerText = current ? current.notation : '?';
+                    progress.innerText = notStarted
+                        ? `共 ${this.guideMoves.length} 步，按開始播放`
+                        : `第 ${this.guideIndex + 1} / ${this.guideMoves.length} 步`;
                 }
-                playBtn.innerText = this.isGuideAutoPlaying ? '暫停' : '自動播放';
+
+                if (this.isGuideAutoPlaying) {
+                    playBtn.innerText = '⏸ 暫停';
+                } else if (done) {
+                    playBtn.innerText = '✓ 已完成';
+                } else if (notStarted) {
+                    playBtn.innerText = '▶ 開始解題';
+                } else {
+                    playBtn.innerText = '▶ 繼續';
+                }
             }
 
             async nextGuideStep(animate = true) {
@@ -8384,12 +8414,23 @@
                 this.updateSolveGuide();
             }
 
+            setGuideSpeed(speed) {
+                if (speed === 'slow')      { this.guideAnimMs = 350; this.guideDelayMs = 1200; }
+                else if (speed === 'fast') { this.guideAnimMs = 80;  this.guideDelayMs = 80; }
+                else                       { this.guideAnimMs = 180; this.guideDelayMs = 600; }
+                document.querySelectorAll('.guide-speed-btn').forEach(b => b.classList.remove('active'));
+                const active = document.getElementById('guide-speed-' + speed);
+                if (active) active.classList.add('active');
+            }
+
             async toggleGuideAutoPlay() {
                 if (this.isGuideAutoPlaying) {
                     this.pauseGuideAutoPlay();
                     return;
                 }
+                if (this.guideIndex >= this.guideMoves.length) return; // already done
                 this.isGuideAutoPlaying = true;
+                this.isSolving = true; // block drag + enable fast animation during playback
                 this.updateSolveGuide();
                 while (this.isGuideAutoPlaying && this.guideIndex < this.guideMoves.length) {
                     const moved = await this.nextGuideStep(true);
@@ -8398,6 +8439,7 @@
                         await new Promise(resolve => setTimeout(resolve, this.guideDelayMs));
                     }
                 }
+                this.isSolving = false; // allow drag again after pause or finish
                 this.pauseGuideAutoPlay();
             }
 
@@ -8472,16 +8514,14 @@
                     }
 
                     this.startSolveGuide(solution.moves);
-                    solveBtnText.innerText = `已載入 ${solution.moves.length} 步`;
-                    console.log('[SOLVE] 開始自動播放');
-                    await this.toggleGuideAutoPlay();
-                    console.log('[SOLVE] 自動播放結束，已解狀態:', this.checkIsSolved(false));
+                    console.log('[SOLVE] 解題方案已載入，等待使用者按下開始');
                 } catch (error) {
                     console.error('[SOLVE] 失敗:', error);
                     solveBtnText.innerText = "解題失敗";
                     alert(`解題失敗：${error.message}\n\n（按 F12 開 console 看詳細訊息）`);
                 } finally {
                     this.isSolving = false;
+                    if (solveBtnText.innerText !== '已完成') solveBtnText.innerText = '自動解題';
                 }
             }
 
@@ -9271,10 +9311,10 @@
                             for (const move of "F R U R' U' F'".split(/\s+/)) await this.applyNotationMove(move, false);
                             const solution = await this.buildSolutionForCurrentState(() => {});
                             this.startSolveGuide(solution.moves);
-                            const oldDelay = this.guideDelayMs;
-                            this.guideDelayMs = 1;
+                            const oldDelay = this.guideDelayMs, oldAnim = this.guideAnimMs;
+                            this.guideDelayMs = 1; this.guideAnimMs = 1;
                             await this.toggleGuideAutoPlay();
-                            this.guideDelayMs = oldDelay;
+                            this.guideDelayMs = oldDelay; this.guideAnimMs = oldAnim;
                             this.assertTest(this.checkIsSolved(false), 'Guide autoplay should solve the cube.');
                         });
                     });
