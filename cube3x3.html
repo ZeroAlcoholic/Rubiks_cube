@@ -5745,118 +5745,33 @@
                 // Commit raw panels so progressive palette includes this shot's centers
                 rawPanels.forEach(p => this.scanRawPanels.push(p));
 
-                // K-means classification on all stickers in this shot, run 3 times for stability.
-                // Cross-validate low-confidence stickers against the progressive palette
-                // (which uses real center-sticker Lab anchors) — fixes orange/blue edge cases.
-                const allLabs = rawPanels.flatMap(p => p.stickers.map(rgb => this.rgbToLab(rgb)));
-
-                // Lab-space white balance: use known center stickers as anchors to correct
-                // for lighting shift (overall warm/cool/dark bias), then shift all sticker Labs.
-                // wbShift is hoisted so anchorLabs can be shifted into the same Lab space as
-                // the k-means centroids — without this the centroid↔anchor match is wrong.
-                let wbL = 0, wbA = 0, wbB = 0;
-                {
-                    let shL = 0, shA = 0, shB = 0, n = 0;
-                    rawPanels.forEach(p => {
-                        const face = p.expectedFace;
-                        if (!face || !STATE_FACE_ORDER.includes(face)) return;
-                        const cRgb = p.stickers[4];
-                        if (!cRgb || this._looksLikeLogoOrSpecular(cRgb)) return;
-                        const measured = this.rgbToLab(cRgb);
-                        const canonical = this._getCanonicalLab(face);
-                        // Only trust center if it's plausibly the right color (< ~63 Lab units)
-                        if (this._labDist(measured, canonical, false) > 4000) return;
-                        shL += canonical.L - measured.L;
-                        shA += canonical.a - measured.a;
-                        shB += canonical.b - measured.b;
-                        n++;
-                    });
-                    if (n > 0) {
-                        shL /= n; shA /= n; shB /= n;
-                        const cap = 28;
-                        wbL = shL = Math.max(-cap, Math.min(cap, shL));
-                        wbA = shA = Math.max(-cap, Math.min(cap, shA));
-                        wbB = shB = Math.max(-cap, Math.min(cap, shB));
-                        allLabs.forEach(lab => { lab.L += shL; lab.a += shA; lab.b += shB; });
-                    }
-                }
-
-                const km = this._kMeans6Best(allLabs, 3);
-                // anchorLabs keyed by FACE LETTER (expectedFace), not position slot ('top'/'left'/'right')
-                const anchorLabs = {};
-                this.shotReviewRejectedAnchors = [];
-                rawPanels.forEach(p => {
-                    const face = p.expectedFace || p.slot;
-                    if (!p.stickers[4] || !STATE_FACE_ORDER.includes(face)) return;
-                    if (this._looksLikeLogoOrSpecular(p.stickers[4])) return;
-                    const anchorLab = this.rgbToLab(p.stickers[4]);
-                    // Apply the same white-balance shift so anchorLab is in the same Lab space
-                    // as the k-means centroids — mismatched spaces cause systematic color swaps.
-                    anchorLab.L += wbL; anchorLab.a += wbA; anchorLab.b += wbB;
-                    // Reject anchor if center color is clearly the wrong face (wrong cube orientation).
-                    // Threshold 3000 ≈ 55 Lab units — tight enough to catch cross-color errors,
-                    // loose enough to allow lighting-shifted variants of the same color.
-                    if (this._labDist(anchorLab, this._getCanonicalLab(face), false) > 3000) {
-                        this.shotReviewRejectedAnchors.push({ face, slot: p.slot });
-                        return;
-                    }
-                    anchorLabs[face] = anchorLab;
-                });
-                const calibAnchors = this._getCalibAnchors();
-                const clusterToFace = km ? this._matchClusters6(km.centroids, anchorLabs, calibAnchors) : null;
+                // Classify each sticker with the same nearest-neighbour Lab classifier used by
+                // the live preview (classifyRgbWithConfidence + progressive palette).
+                // k-means was removed: with only 3 real colors per shot, k=6 always split each
+                // color into sub-clusters that got matched to wrong face labels.
                 const palette = this.buildProgressivePalette();
+                this.shotReviewRejectedAnchors = [];  // kept for snapshot compatibility
 
-                let stickerGlobalIdx = 0;
                 this.shotReviewCurrentPanels = rawPanels.map(panel => {
                     const colors = [], confidence = [];
                     panel.stickers.forEach((rgb, i) => {
                         let face, conf;
-                        // Center sticker: use expectedFace (the face letter like 'U', 'F', 'R').
-                        // panel.slot may be a position key ('top','left','right') in two-shot mode,
-                        // so we must NOT use slot as the face label here.
                         if (i === 4) {
+                            // Center sticker: identity determined by which face faces the camera,
+                            // not by color — avoids misclassifying under unusual lighting.
                             face = panel.expectedFace || panel.slot;
                             conf = 99;
-                            colors.push(face);
-                            confidence.push(conf);
-                            stickerGlobalIdx++;
-                            return;
-                        }
-                        if (km && clusterToFace) {
-                            const ci = km.assignments[stickerGlobalIdx];
-                            face = clusterToFace[ci] || panel.expectedFace;
-                            const lab = allLabs[stickerGlobalIdx];
-                            const ownDist = this._labDist(lab, km.centroids[ci], false);
-                            let secondDist = Infinity;
-                            for (let j = 0; j < 6; j++) {
-                                if (j !== ci) {
-                                    const d = this._labDist(lab, km.centroids[j], false);
-                                    if (d < secondDist) secondDist = d;
-                                }
-                            }
-                            conf = ownDist > 0 ? secondDist / ownDist : 99;
-                            // Cross-validate non-center low-confidence stickers
-                            if (conf < 1.8) {
-                                const alt = this.classifyRgbWithConfidence(rgb, palette);
-                                if (alt.face && alt.face !== face && alt.confidence > 2.0) {
-                                    face = alt.face;
-                                    conf = alt.confidence;
-                                }
-                            }
                         } else {
                             const r = this.classifyRgbWithConfidence(rgb, palette);
                             face = r.face || panel.expectedFace;
                             conf = r.confidence;
+                            // Specular highlight: color info is physically lost
+                            if (rgb.r >= 248 || rgb.g >= 248 || rgb.b >= 248) conf = Math.min(conf, 1.4);
+                            // Deep shadow: very dark sticker may confuse colors
+                            if (Math.max(rgb.r, rgb.g, rgb.b) < 55) conf = Math.min(conf, 1.4);
                         }
-                        // Specular highlight detection: if any channel is saturated (≥248),
-                        // physical color information is lost — force into uncertain zone for review.
-                        const isSpecular = rgb.r >= 248 || rgb.g >= 248 || rgb.b >= 248;
-                        // Deep-shadow detection: very dark sticker may be confused with another color
-                        const isDeepShadow = Math.max(rgb.r, rgb.g, rgb.b) < 55;
-                        if (isSpecular || isDeepShadow) conf = Math.min(conf, 1.4);
                         colors.push(face);
                         confidence.push(conf);
-                        stickerGlobalIdx++;
                     });
                     return {
                         key: panel.slot, expectedFace: panel.expectedFace,
