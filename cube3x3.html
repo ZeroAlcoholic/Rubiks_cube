@@ -8333,6 +8333,11 @@
                     return false;
                 }
                 const move = this.guideMoves[this.guideIndex];
+                // 動畫開始前先顯示當前步號，避免顯示跑快一步
+                const notationEl = document.getElementById('guide-notation');
+                const progressEl = document.getElementById('guide-progress');
+                if (notationEl) notationEl.innerText = move.notation;
+                if (progressEl) progressEl.innerText = `第 ${this.guideIndex + 1} / ${this.guideMoves.length} 步`;
                 await this.applyNotationMove(move.notation, animate);
                 this.executedGuideMoves.push(move.notation);
                 this.guideIndex++;
