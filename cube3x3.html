@@ -7115,12 +7115,10 @@
                     if (panel && panel.stickers && panel.stickers[4]
                             && !this._looksLikeLogoOrSpecular(panel.stickers[4])) {
                         const panLab = this.rgbToLab(panel.stickers[4]);
-                        // Only trust the real center as anchor when it's clearly the right color
-                        if (this._labDist(panLab, this._getCanonicalLab(face), false) <= 3000) {
-                            palette[face] = [panLab];
-                        } else {
-                            palette[face] = MULTI_REFS[face].map(rgb => this.rgbToLab(rgb));
-                        }
+                        // Prepend captured center to MULTI_REFS instead of replacing.
+                        // Keeps refsArr.length > 1 → isUncalibrated=true → downweightL=true,
+                        // matching live-preview behaviour while adding real-camera calibration in a*b*.
+                        palette[face] = [panLab, ...MULTI_REFS[face].map(rgb => this.rgbToLab(rgb))];
                     } else {
                         palette[face] = MULTI_REFS[face].map(rgb => this.rgbToLab(rgb));
                     }
