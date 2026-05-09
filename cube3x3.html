@@ -4133,8 +4133,8 @@
 
                 this.pivot = new THREE.Object3D();
                 this.particles = [];
+                this._cubeGeometry = null;
                 this.solver = new CubeJSSolverAdapter();
-                this.effectsEnabled = false;
                 this.editorState = SOLVED_STATE;
                 this.selectedEditorFace = 'U';
                 this.guideMoves = [];
@@ -4272,11 +4272,12 @@
             }
 
             createRubiksCube() {
+                if (this._cubeGeometry) { this._cubeGeometry.dispose(); this._cubeGeometry = null; }
                 this.cubes.forEach(c => this.scene.remove(c));
                 this.cubes = [];
-                // 重置時清空堆疊
-                this.moveStack = []; 
+                this.moveStack = [];
                 const geometry = new THREE.BoxGeometry(0.96, 0.96, 0.96);
+                this._cubeGeometry = geometry;
                 const positions = this.getSlicePositions();
                 const outer = Math.max(...positions.map(v => Math.abs(v)));
 
@@ -4619,6 +4620,10 @@
                     this.drawScannerOverlayLoop();
                 } catch (error) {
                     this._scannerOpening = false;
+                    if (this.scannerStream) {
+                        this.scannerStream.getTracks().forEach(t => t.stop());
+                        this.scannerStream = null;
+                    }
                     status.innerText = `鏡頭開啟失敗：${error.message}`;
                 }
             }
@@ -4691,6 +4696,10 @@
                     this.scannerStream = null;
                 }
                 this.scannerSmoothedRgbs = null;
+                if (this.scannerPreviewCanvas) {
+                    this.scannerPreviewCanvas.width = 0;
+                    this.scannerPreviewCanvas.height = 0;
+                }
                 this.scannerPreviewCanvas = null;
                 this.scannerPreviewCtx = null;
                 this.scannerStableFrames = 0;
