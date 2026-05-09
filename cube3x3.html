@@ -5752,6 +5752,9 @@
 
                 // Lab-space white balance: use known center stickers as anchors to correct
                 // for lighting shift (overall warm/cool/dark bias), then shift all sticker Labs.
+                // wbShift is hoisted so anchorLabs can be shifted into the same Lab space as
+                // the k-means centroids — without this the centroid↔anchor match is wrong.
+                let wbL = 0, wbA = 0, wbB = 0;
                 {
                     let shL = 0, shA = 0, shB = 0, n = 0;
                     rawPanels.forEach(p => {
@@ -5771,9 +5774,9 @@
                     if (n > 0) {
                         shL /= n; shA /= n; shB /= n;
                         const cap = 28;
-                        shL = Math.max(-cap, Math.min(cap, shL));
-                        shA = Math.max(-cap, Math.min(cap, shA));
-                        shB = Math.max(-cap, Math.min(cap, shB));
+                        wbL = shL = Math.max(-cap, Math.min(cap, shL));
+                        wbA = shA = Math.max(-cap, Math.min(cap, shA));
+                        wbB = shB = Math.max(-cap, Math.min(cap, shB));
                         allLabs.forEach(lab => { lab.L += shL; lab.a += shA; lab.b += shB; });
                     }
                 }
@@ -5787,6 +5790,9 @@
                     if (!p.stickers[4] || !STATE_FACE_ORDER.includes(face)) return;
                     if (this._looksLikeLogoOrSpecular(p.stickers[4])) return;
                     const anchorLab = this.rgbToLab(p.stickers[4]);
+                    // Apply the same white-balance shift so anchorLab is in the same Lab space
+                    // as the k-means centroids — mismatched spaces cause systematic color swaps.
+                    anchorLab.L += wbL; anchorLab.a += wbA; anchorLab.b += wbB;
                     // Reject anchor if center color is clearly the wrong face (wrong cube orientation).
                     // Threshold 3000 ≈ 55 Lab units — tight enough to catch cross-color errors,
                     // loose enough to allow lighting-shifted variants of the same color.
