@@ -5737,6 +5737,35 @@
                 // Cross-validate low-confidence stickers against the progressive palette
                 // (which uses real center-sticker Lab anchors) — fixes orange/blue edge cases.
                 const allLabs = rawPanels.flatMap(p => p.stickers.map(rgb => this.rgbToLab(rgb)));
+
+                // Lab-space white balance: use known center stickers as anchors to correct
+                // for lighting shift (overall warm/cool/dark bias), then shift all sticker Labs.
+                {
+                    let shL = 0, shA = 0, shB = 0, n = 0;
+                    rawPanels.forEach(p => {
+                        const face = p.expectedFace;
+                        if (!face || !STATE_FACE_ORDER.includes(face)) return;
+                        const cRgb = p.stickers[4];
+                        if (!cRgb || this._looksLikeLogoOrSpecular(cRgb)) return;
+                        const measured = this.rgbToLab(cRgb);
+                        const canonical = this._getCanonicalLab(face);
+                        // Only trust center if it's plausibly the right color (< ~63 Lab units)
+                        if (this._labDist(measured, canonical, false) > 4000) return;
+                        shL += canonical.L - measured.L;
+                        shA += canonical.a - measured.a;
+                        shB += canonical.b - measured.b;
+                        n++;
+                    });
+                    if (n > 0) {
+                        shL /= n; shA /= n; shB /= n;
+                        const cap = 28;
+                        shL = Math.max(-cap, Math.min(cap, shL));
+                        shA = Math.max(-cap, Math.min(cap, shA));
+                        shB = Math.max(-cap, Math.min(cap, shB));
+                        allLabs.forEach(lab => { lab.L += shL; lab.a += shA; lab.b += shB; });
+                    }
+                }
+
                 const km = this._kMeans6Best(allLabs, 3);
                 // anchorLabs keyed by FACE LETTER (expectedFace), not position slot ('top'/'left'/'right')
                 const anchorLabs = {};
@@ -6364,19 +6393,6 @@
                     // Force center label to slot, regardless of classification
                     this.faceEditState[4] = slot;
                     this.faceEditUserEdits = new Array(9).fill(false);
-                    // Auto-detect orientation using corner/edge consistency with confirmed adjacent faces.
-                    // Only rotates the whole face array — never changes individual sticker colors.
-                    const rotIdx = this._detectFaceOrientation(this.faceEditState, slot);
-                    if (rotIdx > 0) {
-                        const UNROTATE = [
-                            [0,1,2,3,4,5,6,7,8],
-                            [2,5,8,1,4,7,0,3,6],
-                            [8,7,6,5,4,3,2,1,0],
-                            [6,3,0,7,4,1,8,5,2],
-                        ];
-                        this.faceEditState = UNROTATE[rotIdx].map(i => this.faceEditState[i]);
-                        this.faceEditState[4] = slot; // center stays slot
-                    }
                 }
                 this.faceEditOriginal = [...this.faceEditState];
                 this.faceEditUncertain = panel.stickers.map((rgb, i) => {
@@ -6580,6 +6596,16 @@
                 // Force center label to confirmed slot
                 this.faceEditState[4] = slot;
 
+                // Apply orientation correction AFTER user confirms colors (not at display time).
+                // Rotates the entire face array so sticker positions match cube geometry.
+                const orientRotIdx = this._detectFaceOrientation(this.faceEditState, slot);
+                if (orientRotIdx > 0) {
+                    const UNROTATE = RubiksGame._UNROTATE;
+                    this.faceEditState = UNROTATE[orientRotIdx].map(i => this.faceEditState[i]);
+                    this.faceEditUserEdits = UNROTATE[orientRotIdx].map(i => (this.faceEditUserEdits || [])[i] || false);
+                    this.faceEditState[4] = slot;
+                }
+
                 // Persist into per-slot history maps so user can navigate back
                 this.scanConfirmedFaces[slot] = [...this.faceEditState];
                 this.scanFaceUserEdits[slot] = [...(this.faceEditUserEdits || new Array(9).fill(false))];
@@ -6644,6 +6670,11 @@
                         this._renderFaceEditGrid(); // shows per-color counts in hint
                     }
                 } else {
+                    // Clear capture lock so auto-capture can trigger for the next face
+                    this.pendingFacePanel = null;
+                    this.scannerStableFrames = 0;
+                    this.scannerStabilityScore = 0;
+                    this.scannerIsCapturing = false;
                     ['scanner-view','stability-bar','scan-instruction-box','live-center-hint',
                      'scan-detected-banner','scan-face-chips','scanner-motion-guide'].forEach(id => {
                         const el = document.getElementById(id);
