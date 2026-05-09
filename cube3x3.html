@@ -6717,6 +6717,12 @@
                 const savedFaces = {};
                 FACES.forEach(f => savedFaces[f] = [...(this.scanConfirmedFaces[f] || [])]);
 
+                // 記錄原始材質色（整體朝向調整後需同步更新材質顏色）
+                const origMatColors = {};
+                FACES.forEach(f => {
+                    origMatColors[f] = this.materials[FACE_TO_MATERIAL_INDEX[f]].color.getHex();
+                });
+
                 // 跳過第一個（identity）— 如果 identity 能通過，前面 _tryAutoOrientFaces 已經試過了
                 for (let oi = 0; oi < orientations.length; oi++) {
                     const orient = orientations[oi];
@@ -6744,7 +6750,12 @@
                     this.scanConfirmedFaces = newFaces;
                     const fixed = this._tryAutoOrientFaces();
                     if (fixed) {
-                        // 找到了，scanConfirmedFaces 已被 _tryAutoOrientFaces 內部修正
+                        // 同步更新材質顏色：orient[newFace] = 原本哪個 slot 的資料移到 newFace
+                        // 使 setState() 後 3D 模型顯示正確的實體顏色
+                        FACES.forEach(newFace => {
+                            const oldFace = orient[newFace];
+                            this.materials[FACE_TO_MATERIAL_INDEX[newFace]].color.setHex(origMatColors[oldFace]);
+                        });
                         return fixed;
                     }
                 }
@@ -8243,9 +8254,21 @@
             }
 
             async applyNotationMove(notation, animate = true) {
-                const move = this.notationToRotation(notation);
-                this.rotateSlice(move.axis, move.val, move.angle, animate, false);
-                if (animate) await this.waitForAnimationEnd();
+                const match = notation.match(/^([URFDLB])([2']?)$/);
+                if (animate && match && match[2] === '2') {
+                    // 雙格轉：分兩段 90° 動畫，中間加停頓讓使用者看清楚是轉兩下
+                    const base = MOVE_TO_ROTATION[match[1]];
+                    const halfAngle = base.dir * Math.PI / 2;
+                    this.rotateSlice(base.axis, base.val, halfAngle, true, false);
+                    await this.waitForAnimationEnd();
+                    await new Promise(r => setTimeout(r, Math.round((this.guideAnimMs || 180) * 0.8)));
+                    this.rotateSlice(base.axis, base.val, halfAngle, true, false);
+                    await this.waitForAnimationEnd();
+                } else {
+                    const move = this.notationToRotation(notation);
+                    this.rotateSlice(move.axis, move.val, move.angle, animate, false);
+                    if (animate) await this.waitForAnimationEnd();
+                }
             }
 
             async buildSolutionForCurrentState(onStatus = () => {}) {
