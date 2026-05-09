@@ -4131,7 +4131,8 @@
                 ];
                 this.blackMat = new THREE.MeshLambertMaterial({ color: 0x1a1a1a });
 
-                this.pivot = new THREE.Object3D(); 
+                this.pivot = new THREE.Object3D();
+                this.particles = [];
                 this.solver = new CubeJSSolverAdapter();
                 this.effectsEnabled = false;
                 this.editorState = SOLVED_STATE;
@@ -4227,6 +4228,7 @@
                 canvas.addEventListener('touchmove', (e) => { e.preventDefault(); this.onPointerMove(e.touches[0]); }, { passive: false });
                 window.addEventListener('touchend', () => this.onPointerUp(), false);
 
+                this._scannerPanelEl = document.getElementById('scanner-panel');
                 this.animate();
             }
 
@@ -7134,6 +7136,22 @@
                         palette[face] = MULTI_REFS[face].map(rgb => this.rgbToLab(rgb));
                     }
                 });
+                // 納入使用者手動校正的 Lab 資料（weight >= 1.5 = 使用者明確改過的格子）
+                // 前置到 palette 最前端，讓分類器優先參考這些「已知正確」的顏色
+                const userEdited = (this.sessionCalib || []).filter(e => e.w >= 1.5);
+                if (userEdited.length > 0) {
+                    const byFace = {};
+                    userEdited.forEach(e => {
+                        if (!byFace[e.f]) byFace[e.f] = [];
+                        byFace[e.f].push({ l: e.l, a: e.a, b: e.b });
+                    });
+                    STATE_FACE_ORDER.forEach(face => {
+                        if (byFace[face] && byFace[face].length > 0) {
+                            palette[face] = [...byFace[face], ...palette[face]];
+                        }
+                    });
+                }
+
                 this._palCache = palette;
                 this._palCacheKey = cacheKey;
                 return palette;
@@ -9291,21 +9309,82 @@
                 const msg = document.getElementById('win-msg');
                 msg.style.opacity = '1';
                 msg.style.transform = 'translate(-50%, -50%) scale(1.2)';
-                msg.classList.add('effects-disabled');
-                if (!this.effectsEnabled) {
-                    setTimeout(() => {
-                        msg.style.opacity = '0';
-                        msg.classList.remove('effects-disabled');
-                    }, 1400);
+                this.createExplosion();
+                setTimeout(() => {
+                    msg.style.opacity = '0';
+                    msg.style.transform = 'translate(-50%, -50%)';
+                }, 2200);
+            }
+
+            createExplosion() {
+                this.cubes.forEach(c => { c.visible = false; });
+                const count = 2000;
+                const positions = new Float32Array(count * 3);
+                const colors = new Float32Array(count * 3);
+                const velocities = [];
+                for (let i = 0; i < count; i++) {
+                    const r = 3.5 * Math.cbrt(Math.random());
+                    const theta = Math.random() * 2 * Math.PI;
+                    const phi = Math.acos(2 * Math.random() - 1);
+                    positions[i*3]   = r * Math.sin(phi) * Math.cos(theta);
+                    positions[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+                    positions[i*3+2] = r * Math.cos(phi);
+                    const hue = Math.random();
+                    const c = new THREE.Color().setHSL(hue, 1.0, 0.6);
+                    colors[i*3] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
+                    velocities.push({
+                        x: (Math.random() - 0.5) * 0.9,
+                        y: (Math.random() - 0.5) * 0.9,
+                        z: (Math.random() - 0.5) * 0.9,
+                    });
                 }
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                geo.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+                const mat = new THREE.PointsMaterial({
+                    size: 0.11, vertexColors: true, transparent: true,
+                    opacity: 1.0, blending: THREE.AdditiveBlending, depthWrite: false,
+                });
+                const ps = new THREE.Points(geo, mat);
+                ps.userData.velocities = velocities;
+                this.scene.add(ps);
+                this.particles.push(ps);
+                this._needsRender = true;
             }
 
             animate() {
                 requestAnimationFrame(() => this.animate());
-                // Skip all work when scanner is covering the 3D view — saves mobile battery.
-                if (document.getElementById('scanner-panel') &&
-                        !document.getElementById('scanner-panel').classList.contains('hidden')) return;
-                this.controls.update(); // dispatches 'change' if damping moved camera
+                // scanner 開著時跳過所有 3D 工作，省電
+                if (this._scannerPanelEl && !this._scannerPanelEl.classList.contains('hidden')) return;
+                this.controls.update();
+
+                // 粒子動畫（勝利爆炸效果）
+                if (this.particles.length > 0) {
+                    this._needsRender = true;
+                    for (let pi = this.particles.length - 1; pi >= 0; pi--) {
+                        const ps = this.particles[pi];
+                        const pos = ps.geometry.attributes.position.array;
+                        const vels = ps.userData.velocities;
+                        for (let i = 0; i < vels.length; i++) {
+                            pos[i*3]   += vels[i].x;
+                            pos[i*3+1] += vels[i].y;
+                            pos[i*3+2] += vels[i].z;
+                            vels[i].y  -= 0.008; // 重力
+                        }
+                        ps.geometry.attributes.position.needsUpdate = true;
+                        ps.material.opacity -= 0.011;
+                        if (ps.material.opacity <= 0) {
+                            this.scene.remove(ps);
+                            ps.geometry.dispose();
+                            ps.material.dispose();
+                            this.particles.splice(pi, 1);
+                            if (this.particles.length === 0) {
+                                this.cubes.forEach(c => { c.visible = true; });
+                            }
+                        }
+                    }
+                }
+
                 if (this.isAnimating || this._needsRender) {
                     this.renderer.render(this.scene, this.camera);
                     this._needsRender = false;
