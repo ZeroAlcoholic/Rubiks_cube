@@ -7064,6 +7064,59 @@
                 return { assignments, centroids };
             }
 
+            _kMeans6Guided(labValues, initCentroids) {
+                const k = 6, n = labValues.length;
+                if (n < k || initCentroids.length !== k) return null;
+                const centroids = initCentroids.map(c => ({ ...c }));
+                const assignments = new Array(n).fill(0);
+                for (let iter = 0; iter < 30; iter++) {
+                    let changed = false;
+                    for (let i = 0; i < n; i++) {
+                        let best = 0, bestD = Infinity;
+                        for (let j = 0; j < k; j++) {
+                            const d = this._labDist(labValues[i], centroids[j], false);
+                            if (d < bestD) { best = j; bestD = d; }
+                        }
+                        if (assignments[i] !== best) { assignments[i] = best; changed = true; }
+                    }
+                    if (!changed) break;
+                    for (let j = 0; j < k; j++) {
+                        const pts = labValues.filter((_, i) => assignments[i] === j);
+                        if (pts.length > 0) {
+                            centroids[j] = {
+                                l: pts.reduce((s, p) => s + p.l, 0) / pts.length,
+                                a: pts.reduce((s, p) => s + p.a, 0) / pts.length,
+                                b: pts.reduce((s, p) => s + p.b, 0) / pts.length,
+                            };
+                        }
+                    }
+                }
+                return { assignments, centroids };
+            }
+
+            _buildKMeansPalette(rawPanels) {
+                const allLab = [];
+                for (const panel of rawPanels) {
+                    if (!panel.stickers || panel.stickers.length !== 9) continue;
+                    for (let i = 0; i < 9; i++) {
+                        const rgb = panel.stickers[i];
+                        if (!rgb) continue;
+                        allLab.push(this.rgbToLab(rgb));
+                    }
+                }
+                if (allLab.length < 18) return null;
+                const initCentroids = STATE_FACE_ORDER.map(f => this.rgbToLab(RubiksGame._CANONICAL_RGB[f]));
+                const result = this._kMeans6Guided(allLab, initCentroids);
+                if (!result) return null;
+                const faceLabels = this._matchClusters6(result.centroids, {}, this._getCalibAnchors());
+                const palette = {};
+                STATE_FACE_ORDER.forEach(face => {
+                    const ci = faceLabels.indexOf(face);
+                    if (ci >= 0) palette[face] = [result.centroids[ci]];
+                });
+                return Object.keys(palette).length === 6 ? palette : null;
+            }
+
             _matchClusters6(centroids, anchorLabs, calibAnchors) {
                 // Priority: current shot center → session/stored calib → canonical fallback
                 const CANONICAL_RGB = RubiksGame._CANONICAL_RGB;
@@ -7130,21 +7183,27 @@
                         { r: 22,  g: 185, b: 48 },  // bright / glossy green
                     ],
                 };
-                const palette = {};
-                STATE_FACE_ORDER.forEach(face => {
-                    let panel = this.scanRawPanels.find(p => p.detectedFace === face);
-                    if (!panel) panel = this.scanRawPanels.find(p => p.expectedFace === face);
-                    if (panel && panel.stickers && panel.stickers[4]
-                            && !this._looksLikeLogoOrSpecular(panel.stickers[4])) {
-                        const panLab = this.rgbToLab(panel.stickers[4]);
-                        // Prepend captured center to MULTI_REFS instead of replacing.
-                        // Keeps refsArr.length > 1 → isUncalibrated=true → downweightL=true,
-                        // matching live-preview behaviour while adding real-camera calibration in a*b*.
-                        palette[face] = [panLab, ...MULTI_REFS[face].map(rgb => this.rgbToLab(rgb))];
-                    } else {
-                        palette[face] = MULTI_REFS[face].map(rgb => this.rgbToLab(rgb));
-                    }
-                });
+                // Method 2: per-image k-means when ≥2 panels captured
+                // Single centroid per face → treated as calibrated (L not downweighted)
+                let palette = this.scanRawPanels.length >= 2
+                    ? (this._buildKMeansPalette(this.scanRawPanels) || {})
+                    : {};
+
+                // Fallback for faces not covered by k-means: center pixel + MULTI_REFS
+                if (Object.keys(palette).length < 6) {
+                    STATE_FACE_ORDER.forEach(face => {
+                        if (palette[face]) return;
+                        let panel = this.scanRawPanels.find(p => p.detectedFace === face);
+                        if (!panel) panel = this.scanRawPanels.find(p => p.expectedFace === face);
+                        if (panel && panel.stickers && panel.stickers[4]
+                                && !this._looksLikeLogoOrSpecular(panel.stickers[4])) {
+                            const panLab = this.rgbToLab(panel.stickers[4]);
+                            palette[face] = [panLab, ...MULTI_REFS[face].map(rgb => this.rgbToLab(rgb))];
+                        } else {
+                            palette[face] = MULTI_REFS[face].map(rgb => this.rgbToLab(rgb));
+                        }
+                    });
+                }
                 // 納入使用者手動校正的 Lab 資料（weight >= 1.5 = 使用者明確改過的格子）
                 // 前置到 palette 最前端，讓分類器優先參考這些「已知正確」的顏色
                 const userEdited = (this.sessionCalib || []).filter(e => e.w >= 1.5);
