@@ -396,8 +396,7 @@
             border-radius: 6px; border: 2px solid rgba(0,0,0,0.3);
             cursor: pointer; transition: transform 0.1s;
         }
-        .face-edit-cell:not(.center):hover { transform: scale(1.08); z-index: 1; }
-        .face-edit-cell.center { border-color: rgba(255,255,255,0.4); cursor: default; }
+        .face-edit-cell:hover { transform: scale(1.08); z-index: 1; }
         .face-edit-cell.uncertain {
             box-shadow: inset 0 0 0 2px #f97316, 0 0 0 1px rgba(249,115,22,0.4);
             animation: faceEditUncertainPulse 1.4s ease-in-out infinite;
@@ -744,7 +743,7 @@
             <div id="scanner-flash"></div>
         </div>
         <div id="shot-review-palette"></div>
-        <div id="shot-review-hint">點選色板選色，再點格子修色（中心格固定）</div>
+        <div id="shot-review-hint">點選色板選色，再點格子修色</div>
         <div id="shot-review-actions"></div>
         <div id="face-edit-area">
             <div id="face-edit-title">偵測為：？色面</div>
@@ -6219,7 +6218,11 @@
                     if (!panel.stickers || panel.stickers.length !== STICKERS_PER_FACE) throw new Error(`第 ${index + 1} 個面板沒有 ${STICKERS_PER_FACE} 個取樣點。`);
                 });
 
-                const panelLabs = rawPanels.map(panel => this.rgbToLab(panel.stickers[5]));
+                const avgCenterLab = stickers => {
+                    const labs = ReductionSolver4.CENTER_IDXS.map(ci => this.rgbToLab(stickers[ci]));
+                    return { l: labs.reduce((s,x) => s+x.l, 0)/labs.length, a: labs.reduce((s,x) => s+x.a, 0)/labs.length, b: labs.reduce((s,x) => s+x.b, 0)/labs.length };
+                };
+                const panelLabs = rawPanels.map(panel => avgCenterLab(panel.stickers));
                 // Use same realistic multi-ref defaults as buildProgressivePalette
                 const CANONICAL_RGB = {
                     U: { r: 200, g: 218, b: 15 }, R: { r: 228, g: 88,  b: 18 },
@@ -6259,7 +6262,8 @@
                 });
                 const paletteLab = {};
                 STATE_FACE_ORDER.forEach(face => {
-                    paletteLab[face] = this.rgbToLab(rawFaces[face][5]); // inner center at index 5 for 4×4
+                    const labs = ReductionSolver4.CENTER_IDXS.map(ci => this.rgbToLab(rawFaces[face][ci]));
+                    paletteLab[face] = { l: labs.reduce((s,x) => s+x.l, 0)/labs.length, a: labs.reduce((s,x) => s+x.a, 0)/labs.length, b: labs.reduce((s,x) => s+x.b, 0)/labs.length };
                 });
                 return STATE_FACE_ORDER.map(face => {
                     return rawFaces[face].map(rgb => this.classifyRgbWithCalibration(rgb, paletteLab)).join('');
@@ -6553,18 +6557,9 @@
                         const br = this.bilinearPoint(corners, (col + 1) / GRID, (row + 1) / GRID);
                         const bl = this.bilinearPoint(corners, col / GRID, (row + 1) / GRID);
                         if (this.pointInQuad({ x: cx, y: cy }, tl, tr, br, bl)) {
-                            const isCenter = (i === 5 || i === 6 || i === 9 || i === 10);
-                            if (isCenter) {
-                                // Center clicked: change face identity and reclassify non-user-edited stickers
-                                ReductionSolver4.CENTER_IDXS.forEach(ci => { panel.classifiedColors[ci] = this.shotReviewSelectedColor; });
-                                panel.expectedFace = this.shotReviewSelectedColor;
-                                if (panel.userEdits) ReductionSolver4.CENTER_IDXS.forEach(ci => { panel.userEdits[ci] = true; });
-                                this._reclassifyPanelFromCenter(panel, this.shotReviewSelectedColor);
-                            } else {
-                                panel.classifiedColors[i] = this.shotReviewSelectedColor;
-                                if (panel.userEdits) panel.userEdits[i] = true;
-                                if (panel.confidence) panel.confidence[i] = 99;
-                            }
+                            panel.classifiedColors[i] = this.shotReviewSelectedColor;
+                            if (panel.userEdits) panel.userEdits[i] = true;
+                            if (panel.confidence) panel.confidence[i] = 99;
                             hit = true;
                             break;
                         }
@@ -6587,8 +6582,11 @@
                         }
                     });
                 }
-                const centerRgb = panel.originalRgbs[5]; // use top-left inner center
-                palette[newCenterColor] = [this.rgbToLab(centerRgb)];
+                const centerRgbs = ReductionSolver4.CENTER_IDXS.map(ci => panel.originalRgbs[ci]).filter(Boolean);
+                const avgR = centerRgbs.reduce((s,x) => s+x.r, 0)/centerRgbs.length;
+                const avgG = centerRgbs.reduce((s,x) => s+x.g, 0)/centerRgbs.length;
+                const avgB = centerRgbs.reduce((s,x) => s+x.b, 0)/centerRgbs.length;
+                palette[newCenterColor] = [this.rgbToLab({ r: avgR, g: avgG, b: avgB })];
                 // Reclassify non-center, non-user-edited stickers
                 for (let i = 0; i < STICKERS_PER_FACE; i++) {
                     if (ReductionSolver4.CENTER_IDXS.includes(i)) continue;
@@ -6744,10 +6742,6 @@
                 const allPanels = [...(this.shotReviewAllEdited || []), ...this.shotReviewCurrentPanels];
                 const rawFaces = {};
                 allPanels.forEach(p => { rawFaces[p.expectedFace] = p.classifiedColors; });
-                // Force all inner center stickers to their face letter — prevents failures
-                STATE_FACE_ORDER.forEach(face => {
-                    if (rawFaces[face]) ReductionSolver4.CENTER_IDXS.forEach(ci => { rawFaces[face][ci] = face; });
-                });
                 const state = STATE_FACE_ORDER.map(face => (rawFaces[face] || []).join('')).join('');
                 const v = StateValidator4.validate(state);
                 if (v.ok) {
@@ -6772,9 +6766,6 @@
                     [...(this.shotReviewAllEdited || []), ...this.shotReviewCurrentPanels].forEach(p => {
                         this.scanConfirmedFaces[p.expectedFace] = [...p.classifiedColors];
                         this.scanFaceUserEdits[p.expectedFace] = [...(p.userEdits || new Array(STICKERS_PER_FACE).fill(false))];
-                    });
-                    STATE_FACE_ORDER.forEach(f => {
-                        if (this.scanConfirmedFaces[f]) ReductionSolver4.CENTER_IDXS.forEach(ci => { this.scanConfirmedFaces[f][ci] = f; });
                     });
                     const fixedState = this._tryDeepAutoFix();
                     if (fixedState) {
@@ -6998,23 +6989,20 @@
                 if (!el) return;
                 el.innerHTML = '';
                 for (let i = 0; i < STICKERS_PER_FACE; i++) {
-                    const isCenter = ReductionSolver4.CENTER_IDXS.includes(i);
                     const cell = document.createElement('div');
-                    let cls = 'face-edit-cell' + (isCenter ? ' center' : '');
+                    let cls = 'face-edit-cell';
                     if (this.faceEditUncertain && this.faceEditUncertain[i]) cls += ' uncertain';
-                    if (!isCenter && this.faceEditUserEdits && this.faceEditUserEdits[i]) cls += ' user-edited';
+                    if (this.faceEditUserEdits && this.faceEditUserEdits[i]) cls += ' user-edited';
                     cell.className = cls;
                     cell.style.background = FACE_COLORS[this.faceEditState[i]] || '#444';
-                    if (!isCenter) {
-                        const idx = i;
-                        cell.onclick = () => {
-                            this.faceEditState[idx] = this.faceEditSelectedColor;
-                            if (this.faceEditUncertain) this.faceEditUncertain[idx] = false;
-                            if (!this.faceEditUserEdits) this.faceEditUserEdits = new Array(STICKERS_PER_FACE).fill(false);
-                            this.faceEditUserEdits[idx] = true;
-                            this._renderFaceEditGrid();
-                        };
-                    }
+                    const idx = i;
+                    cell.onclick = () => {
+                        this.faceEditState[idx] = this.faceEditSelectedColor;
+                        if (this.faceEditUncertain) this.faceEditUncertain[idx] = false;
+                        if (!this.faceEditUserEdits) this.faceEditUserEdits = new Array(STICKERS_PER_FACE).fill(false);
+                        this.faceEditUserEdits[idx] = true;
+                        this._renderFaceEditGrid();
+                    };
                     el.appendChild(cell);
                 }
                 this._updateFaceEditCounts();
@@ -7033,7 +7021,9 @@
                         }
                     });
                 }
-                palette[newCenterColor] = [this.rgbToLab(panel.stickers[5])];
+                const cLabs = ReductionSolver4.CENTER_IDXS.map(ci => this.rgbToLab(panel.stickers[ci]));
+                const avgCLab = { l: cLabs.reduce((s,x) => s+x.l, 0)/cLabs.length, a: cLabs.reduce((s,x) => s+x.a, 0)/cLabs.length, b: cLabs.reduce((s,x) => s+x.b, 0)/cLabs.length };
+                palette[newCenterColor] = [avgCLab];
                 for (let i = 0; i < STICKERS_PER_FACE; i++) {
                     if (ReductionSolver4.CENTER_IDXS.includes(i)) continue;
                     if (this.faceEditUserEdits && this.faceEditUserEdits[i]) continue;
@@ -7096,9 +7086,6 @@
                 // FREE-ORDER: slot comes from auto-detected face (set in showFaceEditReview / _changeFaceIdentity)
                 const slot = this.pendingFacePanel.slot;
                 if (!slot || !STATE_FACE_ORDER.includes(slot)) return;
-                // Force center labels to confirmed slot
-                ReductionSolver4.CENTER_IDXS.forEach(ci => { this.faceEditState[ci] = slot; });
-
                 // Persist into per-slot history maps so user can navigate back
                 this.scanConfirmedFaces[slot] = [...this.faceEditState];
                 this.scanFaceUserEdits[slot] = [...(this.faceEditUserEdits || new Array(STICKERS_PER_FACE).fill(false))];
