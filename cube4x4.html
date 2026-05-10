@@ -5275,18 +5275,10 @@
                 if (remaining > 0) {
                     status.innerText = `已確認 ${confirmedCount} / 6 面`;
                     if (instructionBox) {
-                        const COLOR_ZH6 = { U:'黃', R:'橙', F:'藍', D:'白', L:'紅', B:'綠' };
-                        const remainingFaces = STATE_FACE_ORDER.filter(f => !this.scanConfirmedFaces[f]);
-                        let instrHtml;
-                        if (confirmedCount === 0) {
-                            instrHtml = `<span class="step-badge">1</span>隨意選一面朝向鏡頭，<strong>16格全進框</strong>後拍攝` +
-                                `<br><span style="font-size:0.8em;opacity:0.55">系統自動辨識顏色面，方向也會自動校正</span>`;
-                        } else {
-                            const swatches = remainingFaces.map(f =>
-                                `<span title="${COLOR_ZH6[f]}色面" style="display:inline-block;width:20px;height:20px;border-radius:5px;background:${FACE_COLORS[f]};vertical-align:middle;margin:0 2px;border:1px solid rgba(255,255,255,0.22)"></span>`
-                            ).join('');
-                            instrHtml = `<span class="step-badge">${confirmedCount + 1}</span>還差 ${remaining} 面：${swatches}　把剩下的面依序朝向鏡頭拍攝`;
-                        }
+                        const instrHtml = confirmedCount === 0
+                            ? `<span class="step-badge">1</span>隨意選一面朝向鏡頭，<strong>16格全進框</strong>後拍攝` +
+                              `<br><span style="font-size:0.8em;opacity:0.55">系統自動辨識是哪個顏色面，方向也會自動校正</span>`
+                            : `<span class="step-badge">${confirmedCount + 1}</span>繼續把剩餘 ${remaining} 個顏色面逐一對準鏡頭拍攝`;
                         instructionBox.innerHTML = instrHtml;
                     }
                     if (captureBtn) { captureBtn.innerText = `拍攝第 ${confirmedCount + 1} 面`; captureBtn.disabled = false; }
@@ -5312,23 +5304,30 @@
                     }).join('');
                     return;
                 }
-                // FREE-ORDER: done chips = solid color fill; pending = tinted outline
+                // Done faces: compact swatch summary row. Pending faces: prominent chips.
                 const COLOR_ZH = { U:'黃', R:'橙', F:'藍', D:'白', L:'紅', B:'綠' };
-                container.innerHTML = STATE_FACE_ORDER.map(face => {
-                    const done = !!this.scanConfirmedFaces[face];
-                    const color = FACE_COLORS[face];
-                    if (done) {
-                        return `<div class="scan-face-chip-item done" style="background:${color}cc;border-color:transparent">
-                            <span style="font-size:1.15rem;line-height:1;color:#fff;text-shadow:0 0 5px rgba(0,0,0,0.9)">✓</span>
-                            <span style="font-size:0.62rem;color:#fff;text-shadow:0 0 3px rgba(0,0,0,0.9)">${COLOR_ZH[face]}</span>
-                        </div>`;
-                    } else {
-                        return `<div class="scan-face-chip-item" style="border-color:${color}77;background:${color}12">
-                            <span class="chip-dot" style="background:transparent;border:2.5px solid ${color}bb;box-sizing:border-box"></span>
-                            <span style="color:${color}cc">${COLOR_ZH[face]}</span>
-                        </div>`;
-                    }
-                }).join('');
+                const doneFaces    = STATE_FACE_ORDER.filter(f =>  this.scanConfirmedFaces[f]);
+                const pendingFaces = STATE_FACE_ORDER.filter(f => !this.scanConfirmedFaces[f]);
+                let html = '';
+                if (doneFaces.length > 0) {
+                    const swatches = doneFaces.map(f =>
+                        `<span title="${COLOR_ZH[f]}色面 ✓" style="display:inline-block;width:22px;height:22px;border-radius:5px;background:${FACE_COLORS[f]}cc;vertical-align:middle;margin:0 2px;border:1px solid rgba(255,255,255,0.2)"></span>`
+                    ).join('');
+                    html += `<div style="font-size:0.69rem;color:#86efac;text-align:center;margin-bottom:4px">已確認 ${doneFaces.length}/6：${swatches}</div>`;
+                }
+                if (pendingFaces.length > 0) {
+                    html += `<div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap">` +
+                        pendingFaces.map(f => {
+                            const c = FACE_COLORS[f];
+                            return `<div class="scan-face-chip-item" style="border-color:${c}77;background:${c}12">
+                                <span class="chip-dot" style="background:transparent;border:2.5px solid ${c}bb;box-sizing:border-box"></span>
+                                <span style="color:${c}cc">${COLOR_ZH[f]}</span>
+                            </div>`;
+                        }).join('') + `</div>`;
+                } else {
+                    html += `<div style="font-size:0.8rem;color:#86efac;text-align:center">✓ 六面完成</div>`;
+                }
+                container.innerHTML = html;
             }
 
             drawScannerOverlayLoop() {
@@ -6938,13 +6937,16 @@
                 if (!el) return;
                 const COLOR_ZH = { U:'黃', R:'橙', F:'藍', D:'白', L:'紅', B:'綠' };
                 const currentFace = this.pendingFacePanel ? this.pendingFacePanel.slot : (this.faceEditSelectedColor || null);
-                el.innerHTML = STATE_FACE_ORDER.map(face => {
+                // Only show unconfirmed faces — confirmed ones are no longer an option to pick
+                const options = STATE_FACE_ORDER.filter(face => !this.scanConfirmedFaces[face]);
+                if (options.length === 0) { el.innerHTML = ''; return; }
+                const label = options.length > 1
+                    ? `<span style="font-size:0.66rem;color:rgba(255,255,255,0.35);align-self:center;margin-right:4px;white-space:nowrap">偵測有誤？點選更正：</span>`
+                    : '';
+                el.innerHTML = label + options.map(face => {
                     const isActive = face === currentFace;
-                    const isDone = !!this.scanConfirmedFaces[face]; // 已確認的面不可再選
-                    const cls = ['face-id-dot', isActive ? 'active' : '', isDone ? 'done' : ''].filter(Boolean).join(' ');
-                    const onclick = isDone ? '' : `onclick="game._changeFaceIdentity('${face}')"`;
-                    const label = COLOR_ZH[face] || face;
-                    return `<div class="${cls}" style="background:${FACE_COLORS[face]}" title="${label}色面${isDone ? '（已確認）' : ''}" ${onclick}>${isActive ? '✓' : ''}</div>`;
+                    const cls = ['face-id-dot', isActive ? 'active' : ''].filter(Boolean).join(' ');
+                    return `<div class="${cls}" style="background:${FACE_COLORS[face]}" title="${COLOR_ZH[face]}色面" onclick="game._changeFaceIdentity('${face}')">${isActive ? '✓' : ''}</div>`;
                 }).join('');
             }
 
