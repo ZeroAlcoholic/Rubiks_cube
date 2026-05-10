@@ -686,7 +686,7 @@
     <div id="state-editor" class="panel hidden">
         <div class="panel-head">
             <div>
-                <h2>3×3 狀態確認</h2>
+                <h2>4×4 狀態確認</h2>
                 <p id="editor-validation">讀取目前方塊狀態</p>
             </div>
             <button class="icon-btn" onclick="game.closeStateEditor()">×</button>
@@ -6842,7 +6842,9 @@
                     this._refineAvgDisps = [];
                     const rawStickers = this.sampleScannerFaceRaw();
                     // 自動辨識：從中心格顏色判斷是哪個顏色面
-                    const guessedFace = this.guessUnusedFaceFromCenter(rawStickers[5]); // inner center at [5] for 4×4
+                    const _cRgbs = ReductionSolver4.CENTER_IDXS.map(ci => rawStickers[ci]).filter(Boolean);
+                    const _avgCRgb = _cRgbs.length > 0 ? { r: _cRgbs.reduce((s,x)=>s+x.r,0)/_cRgbs.length, g: _cRgbs.reduce((s,x)=>s+x.g,0)/_cRgbs.length, b: _cRgbs.reduce((s,x)=>s+x.b,0)/_cRgbs.length } : rawStickers[5];
+                    const guessedFace = this.guessUnusedFaceFromCenter(_avgCRgb);
                     const detectedFace = guessedFace || STATE_FACE_ORDER.find(f => !this.scanConfirmedFaces[f]);
                     if (!detectedFace) return;
                     const panel = {
@@ -6872,10 +6874,11 @@
                         }
                     });
                 }
-                // Center RGB anchors the slot's color (works for non-standard cubes)
-                const centerRgb = panel.stickers[5]; // inner center at [5]
-                if (centerRgb) {
-                    palette = { ...palette, [slot]: [this.rgbToLab(centerRgb)] };
+                // Average all 4 center RGBs to anchor this slot's color in the palette
+                const centerLabs = ReductionSolver4.CENTER_IDXS.map(ci => panel.stickers[ci]).filter(Boolean).map(rgb => this.rgbToLab(rgb));
+                if (centerLabs.length > 0) {
+                    const avgCenterLab = { l: centerLabs.reduce((s,x) => s+x.l, 0)/centerLabs.length, a: centerLabs.reduce((s,x) => s+x.a, 0)/centerLabs.length, b: centerLabs.reduce((s,x) => s+x.b, 0)/centerLabs.length };
+                    palette = { ...palette, [slot]: [avgCenterLab] };
                 }
                 if (restoreState && restoreState.length === STICKERS_PER_FACE) {
                     // Going back: use the user's previously-confirmed state
@@ -6883,13 +6886,10 @@
                     this.faceEditUserEdits = restoreEdits ? [...restoreEdits] : new Array(STICKERS_PER_FACE).fill(false);
                 } else {
                     this.faceEditState = panel.stickers.map(rgb => this.classifyRgbWithCalibration(rgb, palette) || slot);
-                    // Force center labels to slot, regardless of classification
-                    ReductionSolver4.CENTER_IDXS.forEach(ci => { this.faceEditState[ci] = slot; });
                     this.faceEditUserEdits = new Array(STICKERS_PER_FACE).fill(false);
                 }
                 this.faceEditOriginal = [...this.faceEditState];
-                this.faceEditUncertain = panel.stickers.map((rgb, i) => {
-                    if (ReductionSolver4.CENTER_IDXS.includes(i)) return false;
+                this.faceEditUncertain = panel.stickers.map((rgb) => {
                     const isSpecular = rgb.r >= 248 || rgb.g >= 248 || rgb.b >= 248;
                     const isDeepShadow = Math.max(rgb.r, rgb.g, rgb.b) < 55;
                     return isSpecular || isDeepShadow;
@@ -6939,7 +6939,7 @@
                 const el = document.getElementById('face-edit-identity-row');
                 if (!el) return;
                 const COLOR_ZH = { U:'黃', R:'橙', F:'藍', D:'白', L:'紅', B:'綠' };
-                const currentFace = this.faceEditState ? this.faceEditState[4] : null;
+                const currentFace = this.pendingFacePanel ? this.pendingFacePanel.slot : (this.faceEditSelectedColor || null);
                 el.innerHTML = STATE_FACE_ORDER.map(face => {
                     const isActive = face === currentFace;
                     const isDone = !!this.scanConfirmedFaces[face]; // 已確認的面不可再選
@@ -6955,7 +6955,6 @@
                 if (!this.faceEditState || !this.pendingFacePanel) return;
                 if (this.scanConfirmedFaces[face]) return; // 已確認面不可搶佔
                 const COLOR_ZH = { U:'黃色',R:'橙色',F:'藍色',D:'白色',L:'紅色',B:'綠色' };
-                this.faceEditState[4] = face;
                 this.pendingFacePanel.slot = face;
                 this.pendingFacePanel.expectedFace = face;
                 this.pendingFacePanel.detectedFace = face;
@@ -7199,6 +7198,7 @@
             // 六面掃描完成後若奇偶校驗失敗，暴力搜尋 4^6=4096 種面旋轉組合，
             // 找到通過 cubejs 驗證的版本後直接套用（不需使用者手動翻轉）。
             _tryAutoOrientFaces() {
+                if (STICKERS_PER_FACE !== 9) return null; // 4×4: scanConfirmedFaces arrays are length 16, not 9
                 if (!window.Cube) return null;
                 const ROT = [
                     [0,1,2,3,4,5,6,7,8],  // 0°
@@ -7240,6 +7240,7 @@
             //   結果是六個中心顏色都對但 cubejs 認為角塊組合不合法
             //   需要把整顆方塊「旋轉」到標準朝向才能通過驗證
             _tryCubeOrientations() {
+                if (STICKERS_PER_FACE !== 9) return null; // 4×4: not applicable
                 if (!window.Cube) return null;
                 const FACES = ['U', 'R', 'F', 'D', 'L', 'B'];
                 const opposites = {U:'D', R:'L', F:'B', D:'U', L:'R', B:'F'};
@@ -7316,6 +7317,7 @@
             //   例：F[0] 應為 L 結果填了 F；L[2] 應為 F 結果填了 L
             //   greedy 平衡無法處理，但對調搜尋可以
             _trySwapPairs() {
+                if (STICKERS_PER_FACE !== 9) return null; // 4×4: labels would be 96, not 54
                 if (!window.Cube) return null;
                 const labels = STATE_FACE_ORDER.flatMap(f => this.scanConfirmedFaces[f] || Array(9).fill(f));
                 if (labels.length !== 54) return null;
@@ -7397,17 +7399,17 @@
                 // User edits are INVIOLATE — never overwritten by auto-balance,
                 // even if doing so would produce a valid state.
                 const palette = this.buildProgressivePalette();
-                const labels = [];        // 54 face-label chars
-                const rawRgbs = [];       // 54 {r,g,b} objects
-                const userEdited = [];    // 54 booleans — true means LOCKED
-                const CENTERS = new Set([4, 13, 22, 31, 40, 49]);
+                const labels = [];        // 96 face-label chars
+                const rawRgbs = [];       // 96 {r,g,b} objects
+                const userEdited = [];    // 96 booleans — true means LOCKED
+                const CENTERS = new Set(); // 4×4 has no fixed centers
 
                 STATE_FACE_ORDER.forEach(face => {
                     const confirmed = this.scanConfirmedFaces[face] || [];
                     const edits = (this.scanFaceUserEdits && this.scanFaceUserEdits[face]) || [];
                     const panel = this.scanFacePanels && this.scanFacePanels[face]
                         || this.scanRawPanels.find(p => p.detectedFace === face || p.expectedFace === face);
-                    for (let i = 0; i < 9; i++) {
+                    for (let i = 0; i < STICKERS_PER_FACE; i++) {
                         labels.push(confirmed[i] || face);
                         rawRgbs.push(panel ? panel.stickers[i] : null);
                         userEdited.push(!!edits[i]);
@@ -7426,8 +7428,8 @@
                     STATE_FACE_ORDER.forEach(f => { counts[f] = 0; });
                     labels.forEach(f => { if (counts[f] !== undefined) counts[f]++; });
 
-                    const over  = STATE_FACE_ORDER.filter(f => counts[f] > 9);
-                    const under = STATE_FACE_ORDER.filter(f => counts[f] < 9);
+                    const over  = STATE_FACE_ORDER.filter(f => counts[f] > STICKERS_PER_FACE);
+                    const under = STATE_FACE_ORDER.filter(f => counts[f] < STICKERS_PER_FACE);
                     if (over.length === 0) break;
 
                     let best = null, bestGain = -Infinity;
@@ -8032,7 +8034,8 @@
                         const slot = this.scanFaces[this.scanIndex];
                         if (!slot) return;
                         const stickers = makeFaceStickers(slot);
-                        const center = stickers[5]; // inner center at index 5 for 4×4
+                        const _dcRgbs = ReductionSolver4.CENTER_IDXS.map(ci => stickers[ci]).filter(Boolean);
+                        const center = _dcRgbs.length > 0 ? { r: _dcRgbs.reduce((s,x)=>s+x.r,0)/_dcRgbs.length, g: _dcRgbs.reduce((s,x)=>s+x.g,0)/_dcRgbs.length, b: _dcRgbs.reduce((s,x)=>s+x.b,0)/_dcRgbs.length } : stickers[5];
                         const detectedFace = this.guessUnusedFaceFromCenter(center);
                         await this.flashCapture();
                         this.showFaceEditReview({ slot, expectedFace: slot, detectedFace, stickers });
