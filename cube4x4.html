@@ -4467,20 +4467,22 @@
                 // U-B edge: U[0][1]=1, U[0][2]=2, B[0][2]=82, B[0][1]=81
                 // U-R edge: U[1][3]=7, U[2][3]=11, R[0][0]=16, R[0][1]=17 -- wait need to re-check
                 // This is complex; using known 4×4 edge adjacencies
+                // Each entry: [piece1_sideA, piece1_sideB, piece2_sideA, piece2_sideB]
+                // piece1_sideA + piece1_sideB must be stickers on the SAME physical cubie.
+                // Verified against FACE_COORDS: U=0..15,R=16..31,F=32..47,D=48..63,L=64..79,B=80..95
                 return [
-                    // [piece1_faceA, piece1_faceB, piece2_faceA, piece2_faceB]
-                    [1,  82,  2,  81], // U-B
-                    [4,  67,  8,  66], // U-L
-                    [7,  19, 11,  18], // U-R
-                    [13, 34, 14, 33],  // U-F
-                    [48, 47, 49, 46],  // D-F
-                    [52, 64, 56, 65],  // D-L
-                    [55, 28, 59, 29],  // D-R
-                    [61, 95, 62, 94],  // D-B
-                    [20, 36, 24, 37],  // F-R
-                    [22, 87, 26, 86],  // B-R
-                    [44, 68, 45, 69],  // F-L
-                    [40, 91, 41, 90],  // B-L
+                    [1,  82,  2,  81], // U-B  (−0.5/+0.5,1.5,−1.5)
+                    [4,  65,  8,  66], // U-L  (−1.5,1.5,−0.5/+0.5)
+                    [7,  18, 11,  17], // U-R  (+1.5,1.5,−0.5/+0.5)
+                    [13, 33, 14, 34],  // U-F  (−0.5/+0.5,1.5,+1.5)
+                    [49, 45, 50, 46],  // D-F  (−0.5/+0.5,−1.5,+1.5)
+                    [52, 78, 56, 77],  // D-L  (−1.5,−1.5,+0.5/−0.5)
+                    [55, 29, 59, 30],  // D-R  (+1.5,−1.5,+0.5/−0.5)
+                    [61, 94, 62, 93],  // D-B  (−0.5/+0.5,−1.5,−1.5)
+                    [20, 39, 24, 43],  // F-R  (+1.5,+0.5/−0.5,+1.5)
+                    [23, 84, 27, 88],  // B-R  (+1.5,+0.5/−0.5,−1.5)
+                    [36, 71, 40, 75],  // F-L  (−1.5,+0.5/−0.5,+1.5)
+                    [87, 68, 91, 72],  // B-L  (−1.5,+0.5/−0.5,−1.5)
                 ];
             }
 
@@ -8662,7 +8664,10 @@
                 let moveAxis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
                 let direction = moveAxis === 'x' ? Math.sign(dx) : Math.sign(dy);
 
-                const pos = this.intersectedCube.position.clone().round();
+                // N=4 uses half-integer positions (±0.5, ±1.5) — must snap to 0.5, not 1.0
+                const _s = v => Math.round(v * 2) / 2;
+                const pos = this.intersectedCube.position.clone();
+                pos.set(_s(pos.x), _s(pos.y), _s(pos.z));
                 const normal = this.intersectedFaceNormal;
 
                 let rotateAxis = 'y';
