@@ -397,6 +397,7 @@
             cursor: pointer; transition: transform 0.1s;
         }
         .face-edit-cell:hover { transform: scale(1.08); z-index: 1; }
+        .face-edit-cell.center { border-color: rgba(255,255,255,0.65); }
         .face-edit-cell.uncertain {
             box-shadow: inset 0 0 0 2px #f97316, 0 0 0 1px rgba(249,115,22,0.4);
             animation: faceEditUncertainPulse 1.4s ease-in-out infinite;
@@ -750,6 +751,7 @@
             <div id="face-edit-identity-row"></div>
             <div id="face-edit-palette" class="face-edit-palette"></div>
             <div id="face-edit-grid"></div>
+            <div style="font-size:0.68rem;color:rgba(255,255,255,0.35);text-align:center;margin-top:1px">白框 4 格＝中心格，決定面的顏色身份</div>
             <div id="face-edit-hint">點格子修色，改中心會重新判讀同面其他格</div>
             <div id="face-edit-actions">
                 <button id="face-edit-back-btn" class="btn" onclick="game.goBackOneFace()" style="display:none">← 上一面</button>
@@ -6906,17 +6908,16 @@
                 document.getElementById('scanner-panel')
                     .querySelectorAll('.scanner-modes,.panel-actions').forEach(el => el.style.display = 'none');
 
-                const COLOR_ZH = {U:'黃色',R:'橙色',F:'藍色',D:'白色',L:'紅色',B:'綠色'};
                 const confirmedCount = Object.keys(this.scanConfirmedFaces).length;
                 const titleEl = document.getElementById('face-edit-title');
                 if (titleEl) {
                     titleEl.style.color = '';
                     if (panel.detectedConfidently === false) {
                         // Center was a logo sticker or specular — can't auto-detect face
-                        titleEl.textContent = `⚠ 請點上方選擇顏色面（${confirmedCount + 1} / 6）`;
+                        titleEl.innerHTML = `⚠ 請點上方選擇顏色面（${confirmedCount + 1} / 6）`;
                         titleEl.style.color = '#fbbf24';
                     } else {
-                        titleEl.textContent = `偵測為：${COLOR_ZH[slot] || slot}面（${confirmedCount + 1} / 6）`;
+                        titleEl.innerHTML = this._buildFaceEditTitle(slot, confirmedCount);
                     }
                 }
 
@@ -6954,14 +6955,13 @@
             _changeFaceIdentity(face) {
                 if (!this.faceEditState || !this.pendingFacePanel) return;
                 if (this.scanConfirmedFaces[face]) return; // 已確認面不可搶佔
-                const COLOR_ZH = { U:'黃色',R:'橙色',F:'藍色',D:'白色',L:'紅色',B:'綠色' };
                 this.pendingFacePanel.slot = face;
                 this.pendingFacePanel.expectedFace = face;
                 this.pendingFacePanel.detectedFace = face;
                 this.faceEditSelectedColor = face;
                 const confirmedCount = Object.keys(this.scanConfirmedFaces).length;
                 const title = document.getElementById('face-edit-title');
-                if (title) title.textContent = `偵測為：${COLOR_ZH[face] || face}面（${confirmedCount + 1} / 6）`;
+                if (title) { title.style.color = ''; title.innerHTML = this._buildFaceEditTitle(face, confirmedCount); }
                 this._renderFaceIdentityRow();
                 this._renderFaceEditPalette();
                 this._renderFaceEditGrid();
@@ -6983,6 +6983,23 @@
                 this._renderFaceEditPalette();
             }
 
+            // Returns innerHTML string for the face-edit title, including a small center-color swatch.
+            _buildFaceEditTitle(slot, confirmedCount) {
+                const COLOR_ZH = {U:'黃色',R:'橙色',F:'藍色',D:'白色',L:'紅色',B:'綠色'};
+                const panel = this.pendingFacePanel;
+                let swatchHtml = '';
+                if (panel && panel.stickers) {
+                    const rgbs = ReductionSolver4.CENTER_IDXS.map(ci => panel.stickers[ci]).filter(Boolean);
+                    if (rgbs.length > 0) {
+                        const r = Math.round(rgbs.reduce((s,x)=>s+x.r,0)/rgbs.length);
+                        const g = Math.round(rgbs.reduce((s,x)=>s+x.g,0)/rgbs.length);
+                        const b = Math.round(rgbs.reduce((s,x)=>s+x.b,0)/rgbs.length);
+                        swatchHtml = `<span title="中心格平均色" style="display:inline-block;width:12px;height:12px;background:rgb(${r},${g},${b});border-radius:3px;vertical-align:middle;margin:0 3px 1px;border:1.5px solid rgba(255,255,255,0.4)"></span>`;
+                    }
+                }
+                return `偵測為：${swatchHtml}${COLOR_ZH[slot] || slot}面（${confirmedCount + 1} / 6）`;
+            }
+
             _renderFaceEditGrid() {
                 const el = document.getElementById('face-edit-grid');
                 if (!el) return;
@@ -6990,6 +7007,7 @@
                 for (let i = 0; i < STICKERS_PER_FACE; i++) {
                     const cell = document.createElement('div');
                     let cls = 'face-edit-cell';
+                    if (ReductionSolver4.CENTER_IDXS.includes(i)) cls += ' center';
                     if (this.faceEditUncertain && this.faceEditUncertain[i]) cls += ' uncertain';
                     if (this.faceEditUserEdits && this.faceEditUserEdits[i]) cls += ' user-edited';
                     cell.className = cls;
