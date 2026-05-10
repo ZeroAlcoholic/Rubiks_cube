@@ -480,24 +480,7 @@
         .scan-face-chip-item.done .chip-dot {
             opacity: 1;
         }
-        .scan-face-chip-item.done::after {
-            content: '✓';
-            position: absolute;
-            top: -7px;
-            right: -7px;
-            width: 16px;
-            height: 16px;
-            border-radius: 50%;
-            background: #22c55e;
-            color: white;
-            font-size: 9px;
-            font-weight: 900;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            line-height: 16px;
-            text-align: center;
-        }
+        .scan-face-chip-item.done::after { content: none; }
         #scanner-flash {
             position: absolute;
             inset: 0;
@@ -5291,10 +5274,21 @@
                 const remaining = 6 - confirmedCount;
                 if (remaining > 0) {
                     status.innerText = `已確認 ${confirmedCount} / 6 面`;
-                    if (instructionBox) instructionBox.innerHTML =
-                        `<span class="step-badge">${confirmedCount + 1}</span>` +
-                        `隨意翻面，對準鏡頭，<strong>9 格全進框</strong>後拍攝。` +
-                        `<br><span style="font-size:0.8em;opacity:0.55">系統會自動辨識是哪個顏色面，方向也會自動校正</span>`;
+                    if (instructionBox) {
+                        const COLOR_ZH6 = { U:'黃', R:'橙', F:'藍', D:'白', L:'紅', B:'綠' };
+                        const remainingFaces = STATE_FACE_ORDER.filter(f => !this.scanConfirmedFaces[f]);
+                        let instrHtml;
+                        if (confirmedCount === 0) {
+                            instrHtml = `<span class="step-badge">1</span>隨意選一面朝向鏡頭，<strong>16格全進框</strong>後拍攝` +
+                                `<br><span style="font-size:0.8em;opacity:0.55">系統自動辨識顏色面，方向也會自動校正</span>`;
+                        } else {
+                            const swatches = remainingFaces.map(f =>
+                                `<span title="${COLOR_ZH6[f]}色面" style="display:inline-block;width:20px;height:20px;border-radius:5px;background:${FACE_COLORS[f]};vertical-align:middle;margin:0 2px;border:1px solid rgba(255,255,255,0.22)"></span>`
+                            ).join('');
+                            instrHtml = `<span class="step-badge">${confirmedCount + 1}</span>還差 ${remaining} 面：${swatches}　把剩下的面依序朝向鏡頭拍攝`;
+                        }
+                        instructionBox.innerHTML = instrHtml;
+                    }
                     if (captureBtn) { captureBtn.innerText = `拍攝第 ${confirmedCount + 1} 面`; captureBtn.disabled = false; }
                 } else {
                     status.innerText = '六面已擷取';
@@ -5318,19 +5312,22 @@
                     }).join('');
                     return;
                 }
-                // FREE-ORDER: chips show all 6 color faces; confirmed = filled + ✓, pending = outlined
+                // FREE-ORDER: done chips = solid color fill; pending = tinted outline
                 const COLOR_ZH = { U:'黃', R:'橙', F:'藍', D:'白', L:'紅', B:'綠' };
                 container.innerHTML = STATE_FACE_ORDER.map(face => {
                     const done = !!this.scanConfirmedFaces[face];
                     const color = FACE_COLORS[face];
-                    const cls = 'scan-face-chip-item' + (done ? ' done' : '');
-                    const style = done
-                        ? `border-color:${color};background:${color}44`
-                        : `border-color:${color}55;background:transparent`;
-                    return `<div class="${cls}" style="${style}">
-                        <span class="chip-dot" style="background:${done ? color : 'transparent'};border:2px solid ${color};box-sizing:border-box"></span>
-                        <span>${COLOR_ZH[face]}${done ? ' ✓' : ''}</span>
-                    </div>`;
+                    if (done) {
+                        return `<div class="scan-face-chip-item done" style="background:${color}cc;border-color:transparent">
+                            <span style="font-size:1.15rem;line-height:1;color:#fff;text-shadow:0 0 5px rgba(0,0,0,0.9)">✓</span>
+                            <span style="font-size:0.62rem;color:#fff;text-shadow:0 0 3px rgba(0,0,0,0.9)">${COLOR_ZH[face]}</span>
+                        </div>`;
+                    } else {
+                        return `<div class="scan-face-chip-item" style="border-color:${color}77;background:${color}12">
+                            <span class="chip-dot" style="background:transparent;border:2.5px solid ${color}bb;box-sizing:border-box"></span>
+                            <span style="color:${color}cc">${COLOR_ZH[face]}</span>
+                        </div>`;
+                    }
                 }).join('');
             }
 
