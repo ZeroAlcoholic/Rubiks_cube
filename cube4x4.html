@@ -444,10 +444,10 @@
         /* ── 掃描 UX 改進樣式 ─────────────────────────────────── */
         .scan-face-progress {
             display: flex;
-            gap: 6px;
+            gap: 4px;
             justify-content: center;
             margin: 8px 0 6px;
-            flex-wrap: wrap;
+            flex-wrap: nowrap;
         }
         .scan-face-chip-item {
             width: 40px;
@@ -481,6 +481,79 @@
             opacity: 1;
         }
         .scan-face-chip-item.done::after { content: none; }
+        .scan-step-chip {
+            flex: 1 1 0;
+            min-width: 0;
+            max-width: 56px;
+            height: 46px;
+            border-radius: 8px;
+            border: 2px solid rgba(255,255,255,0.12);
+            background: rgba(255,255,255,0.03);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.62rem;
+            font-weight: 700;
+            color: rgba(255,255,255,0.28);
+            transition: all 0.25s ease;
+            gap: 1px;
+            position: relative;
+        }
+        .scan-step-chip.current {
+            border-color: rgba(96,165,250,0.7);
+            background: rgba(96,165,250,0.10);
+            color: #93c5fd;
+            box-shadow: 0 0 6px rgba(96,165,250,0.25);
+        }
+        .scan-step-chip.done {
+            border-color: rgba(134,239,172,0.45);
+            background: rgba(134,239,172,0.06);
+            color: #bbf7d0;
+            cursor: pointer;
+        }
+        .scan-step-chip.done:active { transform: scale(0.95); }
+        .scan-step-chip .step-num {
+            font-size: 0.55rem;
+            opacity: 0.5;
+            line-height: 1;
+        }
+        .scan-step-chip.current .step-num,
+        .scan-step-chip.done .step-num { opacity: 0.8; }
+        .scan-step-chip .step-label {
+            font-size: 0.72rem;
+            line-height: 1.1;
+        }
+        .scan-step-chip .step-status {
+            font-size: 0.6rem;
+            line-height: 1;
+        }
+        .scan-step-chip .step-thumb {
+            display: grid;
+            grid-template-columns: repeat(4, 5px);
+            grid-template-rows: repeat(4, 5px);
+            gap: 1px;
+            margin-top: 1px;
+        }
+        .scan-step-chip .step-thumb span {
+            border-radius: 1px;
+        }
+        .six-face-rot-hint {
+            display: none;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border-radius: 8px;
+            background: rgba(96,165,250,0.10);
+            border: 1px solid rgba(96,165,250,0.25);
+            color: #93c5fd;
+            font-size: 0.82rem;
+            font-weight: 600;
+            margin: 4px auto 2px;
+            width: fit-content;
+        }
+        .six-face-rot-hint.visible { display: flex; }
         #scanner-flash {
             position: absolute;
             inset: 0;
@@ -705,6 +778,7 @@
                         <span id="scan-target-front" class="scan-face-chip">F</span>
                         <span id="scan-target-right" class="scan-face-chip">R</span>
                     </div>
+                    <div id="six-face-rot-hint" class="six-face-rot-hint"></div>
                 </div>
             </div>
             <button class="icon-btn" onclick="game.closeScanner()">×</button>
@@ -4009,6 +4083,14 @@
             U: '黃色面（頂）', R: '橘色面（右）', F: '藍色面（前）',
             D: '白色面（底）', L: '紅色面（左）', B: '綠色面（後）'
         };
+        const SIX_FACE_SCAN_STEPS = [
+            { face:'F', pos:'前面', instr:'將方塊任一面正對鏡頭，<strong>16 格全進框</strong>', rot:null },
+            { face:'R', pos:'右面', instr:'方塊<strong>向左轉 90°</strong>，露出右面', rot:'← 向左轉' },
+            { face:'B', pos:'後面', instr:'繼續<strong>向左轉 90°</strong>，露出後面', rot:'← 向左轉' },
+            { face:'L', pos:'左面', instr:'再<strong>向左轉 90°</strong>，露出左面',   rot:'← 向左轉' },
+            { face:'U', pos:'頂面', instr:'將方塊<strong>頂面</strong>朝向鏡頭',      rot:'↑ 頂面翻前' },
+            { face:'D', pos:'底面', instr:'翻轉方塊，<strong>底面</strong>朝向鏡頭',  rot:'↓ 底面翻前' },
+        ];
 
         class StateValidator4 {
             static validate(stateStr) {
@@ -4668,7 +4750,7 @@
                 this.guideDelayMs = 600;
                 this.guideAnimMs = 180;
                 this.scannerMode = 'two-shot';
-                this.scanFaces = ['U', 'R', 'F', 'D', 'L', 'B'];
+                this.scanFaces = SIX_FACE_SCAN_STEPS.map(s => s.face);
                 this.pendingFacePanel = null;
                 this.shotReviewActive = false;
                 this.shotReviewAllEdited = [];
@@ -5165,13 +5247,15 @@
                 this.scannerStabilityScore = 0;
                 this.scannerPrevRgbs = null;
                 this.scannerIsCapturing = false;
+                this._reEditingFace = null;
+                this._retakeForFace = null;
+                this._identityRowExpanded = false;
                 const banner = document.getElementById('scan-detected-banner');
                 if (banner) banner.classList.remove('show');
                 const hint = document.getElementById('live-center-hint');
                 if (hint) hint.classList.remove('visible');
                 const fillEl2 = document.getElementById('stability-bar-fill');
                 if (fillEl2) fillEl2.style.width = '0%';
-                // only show center hint for six-face mode
                 if (hint) hint.style.display = mode === 'six-face' ? '' : 'none';
                 this.syncScannerModeUI();
                 this.updateScannerStatus();
@@ -5190,11 +5274,38 @@
             updateScannerMotionGuide() {
                 const guide = document.getElementById('scanner-motion-guide');
                 if (!guide) return;
+                const rotHint = document.getElementById('six-face-rot-hint');
+                if (this.scannerMode === 'six-face') {
+                    guide.classList.add('active');
+                    const miniCube = document.getElementById('scan-mini-cube');
+                    if (miniCube) miniCube.style.display = 'none';
+                    const arrow = document.getElementById('scan-motion-arrow');
+                    if (arrow) arrow.style.display = 'none';
+                    const target = guide.querySelector('.scan-motion-target');
+                    if (target) target.style.display = 'none';
+                    const step = SIX_FACE_SCAN_STEPS[this.scanIndex];
+                    if (rotHint) {
+                        if (step && step.rot) {
+                            rotHint.textContent = step.rot;
+                            rotHint.classList.add('visible');
+                        } else {
+                            rotHint.classList.remove('visible');
+                        }
+                    }
+                    return;
+                }
+                // two-shot mode
+                if (rotHint) rotHint.classList.remove('visible');
+                const miniCube = document.getElementById('scan-mini-cube');
+                if (miniCube) miniCube.style.display = '';
+                const arrow = document.getElementById('scan-motion-arrow');
+                if (arrow) arrow.style.display = '';
+                const target = guide.querySelector('.scan-motion-target');
+                if (target) target.style.display = '';
                 const active = this.scannerMode === 'two-shot';
                 guide.classList.toggle('active', active);
                 if (!active) return;
                 const shot = TWO_SHOT_SCANS[Math.min(this.scanIndex, TWO_SHOT_SCANS.length - 1)];
-                const miniCube = document.getElementById('scan-mini-cube');
                 if (miniCube) miniCube.classList.toggle('flip', this.scanIndex === 1);
                 const labels = {
                     'scan-mini-top': shot.panels.top,
@@ -5241,6 +5352,9 @@
                 if (rotPr) rotPr.classList.add('hidden');
                 this.faceEditState = null;
                 this.faceEditUserEdits = null;
+                this._reEditingFace = null;
+                this._retakeForFace = null;
+                this._identityRowExpanded = false;
                 this.shotReviewHistory = [];
                 const banner = document.getElementById('scan-detected-banner');
                 if (banner) banner.classList.remove('show');
@@ -5271,17 +5385,17 @@
                     return;
                 }
                 const confirmedCount = Object.keys(this.scanConfirmedFaces).length;
-                const remaining = 6 - confirmedCount;
-                if (remaining > 0) {
-                    status.innerText = `已確認 ${confirmedCount} / 6 面`;
+                const step = SIX_FACE_SCAN_STEPS[this.scanIndex];
+                if (step) {
+                    status.innerText = `掃描進度 ${confirmedCount} / 6`;
                     if (instructionBox) {
-                        const instrHtml = confirmedCount === 0
-                            ? `<span class="step-badge">1</span>隨意選一面朝向鏡頭，<strong>16格全進框</strong>後拍攝` +
-                              `<br><span style="font-size:0.8em;opacity:0.55">系統自動辨識是哪個顏色面，方向也會自動校正</span>`
-                            : `<span class="step-badge">${confirmedCount + 1}</span>繼續把剩餘 ${remaining} 個顏色面逐一對準鏡頭拍攝`;
+                        let instrHtml = `<span class="step-badge">${this.scanIndex + 1}</span>${step.instr}`;
+                        if (step.rot) {
+                            instrHtml += `<br><span style="font-size:0.85em;opacity:0.65">${step.rot}</span>`;
+                        }
                         instructionBox.innerHTML = instrHtml;
                     }
-                    if (captureBtn) { captureBtn.innerText = `拍攝第 ${confirmedCount + 1} 面`; captureBtn.disabled = false; }
+                    if (captureBtn) { captureBtn.innerText = `拍攝：${step.pos}（${this.scanIndex + 1}/6）`; captureBtn.disabled = false; }
                 } else {
                     status.innerText = '六面已擷取';
                     if (instructionBox) instructionBox.innerHTML = '✓ 六面擷取完成，正在辨識顏色...';
@@ -5304,29 +5418,30 @@
                     }).join('');
                     return;
                 }
-                // Done faces: compact swatch summary row. Pending faces: prominent chips.
-                const COLOR_ZH = { U:'黃', R:'橙', F:'藍', D:'白', L:'紅', B:'綠' };
-                const doneFaces    = STATE_FACE_ORDER.filter(f =>  this.scanConfirmedFaces[f]);
-                const pendingFaces = STATE_FACE_ORDER.filter(f => !this.scanConfirmedFaces[f]);
-                let html = '';
-                if (doneFaces.length > 0) {
-                    const swatches = doneFaces.map(f =>
-                        `<span title="${COLOR_ZH[f]}色面 ✓" style="display:inline-block;width:22px;height:22px;border-radius:5px;background:${FACE_COLORS[f]}cc;vertical-align:middle;margin:0 2px;border:1px solid rgba(255,255,255,0.2)"></span>`
-                    ).join('');
-                    html += `<div style="font-size:0.69rem;color:#86efac;text-align:center;margin-bottom:4px">已確認 ${doneFaces.length}/6：${swatches}</div>`;
-                }
-                if (pendingFaces.length > 0) {
-                    html += `<div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap">` +
-                        pendingFaces.map(f => {
-                            const c = FACE_COLORS[f];
-                            return `<div class="scan-face-chip-item" style="border-color:${c}77;background:${c}12">
-                                <span class="chip-dot" style="background:transparent;border:2.5px solid ${c}bb;box-sizing:border-box"></span>
-                                <span style="color:${c}cc">${COLOR_ZH[f]}</span>
-                            </div>`;
-                        }).join('') + `</div>`;
-                } else {
-                    html += `<div style="font-size:0.8rem;color:#86efac;text-align:center">✓ 六面完成</div>`;
-                }
+                const POS_ZH_SHORT = { F:'前', R:'右', B:'後', L:'左', U:'頂', D:'底' };
+                let html = '<div style="display:flex;gap:4px;justify-content:center;flex-wrap:nowrap">';
+                SIX_FACE_SCAN_STEPS.forEach((step, i) => {
+                    const face = step.face;
+                    const done = !!this.scanConfirmedFaces[face];
+                    const isCurrent = (i === this.scanIndex) && !done;
+                    let cls = 'scan-step-chip';
+                    if (done) cls += ' done';
+                    else if (isCurrent) cls += ' current';
+                    const onclick = done ? ` onclick="game.editCompletedFace('${face}')"` : '';
+                    let inner = `<span class="step-num">${i + 1}</span>`;
+                    inner += `<span class="step-label">${POS_ZH_SHORT[face]}</span>`;
+                    if (done) {
+                        const colors = this.scanConfirmedFaces[face];
+                        const thumb = `<div class="step-thumb">${colors.map(c => `<span style="background:${FACE_COLORS[c] || '#444'}"></span>`).join('')}</div>`;
+                        inner += thumb;
+                    } else if (isCurrent) {
+                        inner += `<span class="step-status">●</span>`;
+                    } else {
+                        inner += `<span class="step-status" style="opacity:0.3">○</span>`;
+                    }
+                    html += `<div class="${cls}"${onclick}>${inner}</div>`;
+                });
+                html += '</div>';
                 container.innerHTML = html;
             }
 
@@ -6835,19 +6950,18 @@
                 const captureBtn = document.getElementById('scanner-capture-btn');
                 if (captureBtn) captureBtn.disabled = true;
                 try {
-                    // 已確認六面則不再擷取
                     if (Object.keys(this.scanConfirmedFaces).length >= 6) return;
                     this._refineAvgDisps = [];
                     const rawStickers = this.sampleScannerFaceRaw();
-                    // 自動辨識：從中心格顏色判斷是哪個顏色面
-                    const _cRgbs = ReductionSolver4.CENTER_IDXS.map(ci => rawStickers[ci]).filter(Boolean);
-                    const _avgCRgb = _cRgbs.length > 0 ? { r: _cRgbs.reduce((s,x)=>s+x.r,0)/_cRgbs.length, g: _cRgbs.reduce((s,x)=>s+x.g,0)/_cRgbs.length, b: _cRgbs.reduce((s,x)=>s+x.b,0)/_cRgbs.length } : rawStickers[5];
-                    const guessedFace = this.guessUnusedFaceFromCenter(_avgCRgb);
-                    const detectedFace = guessedFace || STATE_FACE_ORDER.find(f => !this.scanConfirmedFaces[f]);
+                    // 固定順序：由步驟序號決定面身份（不再自動偵測）
+                    const detectedFace = this._retakeForFace
+                        || (SIX_FACE_SCAN_STEPS[this.scanIndex] && SIX_FACE_SCAN_STEPS[this.scanIndex].face)
+                        || STATE_FACE_ORDER.find(f => !this.scanConfirmedFaces[f]);
+                    this._retakeForFace = null;
                     if (!detectedFace) return;
                     const panel = {
                         slot: detectedFace, expectedFace: detectedFace, detectedFace, stickers: rawStickers,
-                        detectedConfidently: !!guessedFace,
+                        detectedConfidently: true,
                     };
                     await this.flashCapture();
                     this.showFaceEditReview(panel);
@@ -6859,7 +6973,7 @@
 
             showFaceEditReview(panel, restoreState = null, restoreEdits = null) {
                 this.pendingFacePanel = panel;
-                // FREE-ORDER: slot is the auto-detected face (center sticker color).
+                this._identityRowExpanded = false;
                 const slot = panel.slot || STATE_FACE_ORDER.find(f => !this.scanConfirmedFaces[f]) || 'U';
 
                 let palette = this.buildProgressivePalette();
@@ -6908,13 +7022,7 @@
                 const titleEl = document.getElementById('face-edit-title');
                 if (titleEl) {
                     titleEl.style.color = '';
-                    if (panel.detectedConfidently === false) {
-                        // Center was a logo sticker or specular — can't auto-detect face
-                        titleEl.innerHTML = `⚠ 請點上方選擇顏色面（${confirmedCount + 1} / 6）`;
-                        titleEl.style.color = '#fbbf24';
-                    } else {
-                        titleEl.innerHTML = this._buildFaceEditTitle(slot, confirmedCount);
-                    }
+                    titleEl.innerHTML = this._buildFaceEditTitle(slot, confirmedCount);
                 }
 
                 // Show/hide back button based on capture history
@@ -6923,7 +7031,7 @@
                 const balRow = document.getElementById('face-edit-balance-row');
                 if (balRow) balRow.style.display = 'none';
 
-                document.getElementById('face-edit-hint').textContent = '點格子修色；若辨識的顏色面不對，點上方圓點更正';
+                document.getElementById('face-edit-hint').textContent = '點格子修色；若面不對，展開下方圓點更正';
                 document.getElementById('face-edit-hint').style.color = 'rgba(255,255,255,0.5)';
                 document.getElementById('face-edit-area').classList.add('active');
                 this._renderFaceIdentityRow();
@@ -6937,17 +7045,19 @@
                 if (!el) return;
                 const COLOR_ZH = { U:'黃', R:'橙', F:'藍', D:'白', L:'紅', B:'綠' };
                 const currentFace = this.pendingFacePanel ? this.pendingFacePanel.slot : (this.faceEditSelectedColor || null);
-                // Only show unconfirmed faces — confirmed ones are no longer an option to pick
                 const options = STATE_FACE_ORDER.filter(face => !this.scanConfirmedFaces[face]);
-                if (options.length === 0) { el.innerHTML = ''; return; }
-                const label = options.length > 1
-                    ? `<span style="font-size:0.66rem;color:rgba(255,255,255,0.35);align-self:center;margin-right:4px;white-space:nowrap">偵測有誤？點選更正：</span>`
-                    : '';
-                el.innerHTML = label + options.map(face => {
+                if (options.length <= 1) { el.innerHTML = ''; return; }
+                const expanded = !!this._identityRowExpanded;
+                const dots = options.map(face => {
                     const isActive = face === currentFace;
                     const cls = ['face-id-dot', isActive ? 'active' : ''].filter(Boolean).join(' ');
                     return `<div class="${cls}" style="background:${FACE_COLORS[face]}" title="${COLOR_ZH[face]}色面" onclick="game._changeFaceIdentity('${face}')">${isActive ? '✓' : ''}</div>`;
                 }).join('');
+                if (expanded) {
+                    el.innerHTML = `<span style="font-size:0.62rem;color:rgba(255,255,255,0.32);align-self:center;cursor:pointer;margin-right:4px" onclick="game._toggleIdentityRow()">▾ 更正面：</span>` + dots;
+                } else {
+                    el.innerHTML = `<span style="font-size:0.62rem;color:rgba(255,255,255,0.28);cursor:pointer;padding:2px 6px" onclick="game._toggleIdentityRow()">▸ 面不對？更正</span>`;
+                }
             }
 
             // 使用者點選身份圓點，手動更正偵測到的顏色面
@@ -6966,6 +7076,11 @@
                 this._renderFaceEditGrid();
             }
 
+            _toggleIdentityRow() {
+                this._identityRowExpanded = !this._identityRowExpanded;
+                this._renderFaceIdentityRow();
+            }
+
             _renderFaceEditPalette() {
                 const el = document.getElementById('face-edit-palette');
                 if (!el) return;
@@ -6982,9 +7097,9 @@
                 this._renderFaceEditPalette();
             }
 
-            // Returns innerHTML string for the face-edit title, including a small center-color swatch.
             _buildFaceEditTitle(slot, confirmedCount) {
-                const COLOR_ZH = {U:'黃色',R:'橙色',F:'藍色',D:'白色',L:'紅色',B:'綠色'};
+                const stepIdx = SIX_FACE_SCAN_STEPS.findIndex(s => s.face === slot);
+                const posLabel = stepIdx >= 0 ? SIX_FACE_SCAN_STEPS[stepIdx].pos : slot;
                 const panel = this.pendingFacePanel;
                 let swatchHtml = '';
                 if (panel && panel.stickers) {
@@ -6996,7 +7111,8 @@
                         swatchHtml = `<span title="中心格平均色" style="display:inline-block;width:12px;height:12px;background:rgb(${r},${g},${b});border-radius:3px;vertical-align:middle;margin:0 3px 1px;border:1.5px solid rgba(255,255,255,0.4)"></span>`;
                     }
                 }
-                return `偵測為：${swatchHtml}${COLOR_ZH[slot] || slot}面（${confirmedCount + 1} / 6）`;
+                const stepNum = stepIdx >= 0 ? stepIdx + 1 : confirmedCount + 1;
+                return `第 ${stepNum} 步：${swatchHtml}${posLabel}（${confirmedCount + 1} / 6）`;
             }
 
             _renderFaceEditGrid() {
@@ -7078,6 +7194,10 @@
             }
 
             retakeFaceEdit() {
+                if (this._reEditingFace) {
+                    this._retakeForFace = this._reEditingFace;
+                    this._reEditingFace = null;
+                }
                 document.getElementById('face-edit-area').classList.remove('active');
                 ['scanner-view','stability-bar','scan-instruction-box','live-center-hint',
                  'scan-detected-banner','scan-face-chips','scanner-motion-guide'].forEach(id => {
@@ -7093,16 +7213,16 @@
                 this.updateScannerStatus();
                 const video = document.getElementById('scanner-video');
                 if (video) video.play().catch(() => {});
-                this.drawScannerOverlayLoop(); // restart live preview
+                this.drawScannerOverlayLoop();
             }
 
             async confirmFaceEdit() {
                 if (!this.faceEditState || !this.pendingFacePanel || this._confirmingFace) return;
                 this._confirmingFace = true;
-                // FREE-ORDER: slot comes from auto-detected face (set in showFaceEditReview / _changeFaceIdentity)
                 const slot = this.pendingFacePanel.slot;
                 if (!slot || !STATE_FACE_ORDER.includes(slot)) return;
-                // Persist into per-slot history maps so user can navigate back
+                const isReEdit = !!this._reEditingFace;
+                this._reEditingFace = null;
                 this.scanConfirmedFaces[slot] = [...this.faceEditState];
                 this.scanFaceUserEdits[slot] = [...(this.faceEditUserEdits || new Array(STICKERS_PER_FACE).fill(false))];
                 if (this.pendingFacePanel) {
@@ -7111,24 +7231,25 @@
                     ));
                     this.scanFacePanels[slot] = this.pendingFacePanel;
                     this.scanRawPanels.push(this.pendingFacePanel);
-                    this._palCache = null; // 強制下一面重建 palette
+                    this._palCache = null;
                 }
-                if (!this.scanCaptureOrder) this.scanCaptureOrder = [];
-                this.scanCaptureOrder.push(slot);
+                if (!isReEdit) {
+                    if (!this.scanCaptureOrder) this.scanCaptureOrder = [];
+                    this.scanCaptureOrder.push(slot);
+                }
                 document.getElementById('face-edit-area').classList.remove('active');
 
-                this.scanIndex++;
+                if (!isReEdit) this.scanIndex++;
                 this.updateFaceProgressChips();
 
-                if (this.scanIndex >= 6) {
+                const allSixConfirmed = Object.keys(this.scanConfirmedFaces).length >= 6;
+                if (allSixConfirmed) {
                     const state = STATE_FACE_ORDER.map(f => (this.scanConfirmedFaces[f] || []).join('')).join('');
                     const v = StateValidator4.validate(state);
                     if (v.ok) {
                         this.closeScanner();
                         await this._finishScanAndSolve(state, 'six-face');
                     } else {
-                        // 若只有 cubejs 奇偶校驗錯誤（各色數量正確），嘗試深度自動修復
-                        // 包含：面旋轉 + 貼紙對調 + 顏色平衡
                         const onlyParity = v.errors.length > 0 &&
                             v.errors.every(e => e.includes('cubejs') || e.includes('忠實解析'));
                         if (onlyParity) {
@@ -7139,18 +7260,15 @@
                                 return;
                             }
                         }
-                        // 驗證失敗：回滾此面的確認，保持最後一面的編輯區，顯示錯誤
-                        // 不自動改色 — 讓使用者手動修正，或點「自動平衡」
                         delete this.scanConfirmedFaces[slot];
                         delete this.scanFacePanels[slot];
                         delete this.scanFaceUserEdits[slot];
                         this.scanRawPanels.pop();
                         this._palCache = null;
-                        if (this.scanCaptureOrder) this.scanCaptureOrder.pop();
-                        this.scanIndex--;
+                        if (!isReEdit && this.scanCaptureOrder) this.scanCaptureOrder.pop();
+                        if (!isReEdit) this.scanIndex--;
                         this.updateFaceProgressChips();
                         document.getElementById('face-edit-area').classList.add('active');
-                        // Show error in title (not hint) so _updateFaceEditCounts() doesn't overwrite it
                         const NAMES_ZH = {U:'黃',R:'橙',F:'藍',D:'白',L:'紅',B:'綠'};
                         const errMsg = v.errors.map(e => {
                             const m = e.match(/^([URFDLB]) 貼紙數為 (\d+)/);
@@ -7163,8 +7281,8 @@
                         if (titleEl) { titleEl.textContent = `⚠ 修色後確認（${errMsg}）`; titleEl.style.color = '#fca5a5'; }
                         const balRow = document.getElementById('face-edit-balance-row');
                         if (balRow) balRow.style.display = 'flex';
-                        this._renderFaceEditGrid(); // shows per-color counts in hint
-                        this._confirmingFace = false; // allow re-confirm after user fixes errors
+                        this._renderFaceEditGrid();
+                        this._confirmingFace = false;
                     }
                 } else {
                     // Clear capture lock so auto-capture can trigger for the next face
@@ -7209,6 +7327,27 @@
                 // Re-show edit view with preserved state
                 if (panel) {
                     this.showFaceEditReview(panel, prevState, prevEdits);
+                }
+            }
+
+            editCompletedFace(face) {
+                if (this.pendingFacePanel) return;
+                if (!this.scanConfirmedFaces[face]) return;
+                this._reEditingFace = face;
+                const panel = this.scanFacePanels[face];
+                const savedState = [...this.scanConfirmedFaces[face]];
+                const savedEdits = this.scanFaceUserEdits[face] ? [...this.scanFaceUserEdits[face]] : null;
+                delete this.scanConfirmedFaces[face];
+                delete this.scanFacePanels[face];
+                delete this.scanFaceUserEdits[face];
+                const capIdx = this.scanCaptureOrder ? this.scanCaptureOrder.indexOf(face) : -1;
+                if (capIdx >= 0) this.scanCaptureOrder.splice(capIdx, 1);
+                const rawIdx = this.scanRawPanels.findIndex(p => p === panel);
+                if (rawIdx >= 0) this.scanRawPanels.splice(rawIdx, 1);
+                this._palCache = null;
+                this.updateFaceProgressChips();
+                if (panel) {
+                    this.showFaceEditReview(panel, savedState, savedEdits);
                 }
             }
 
@@ -8141,7 +8280,8 @@
                     L:{r:190,g:0,b:0},    B:{r:0,g:150,b:0},
                 };
                 const stickersFromState = (stateStr, faceIdx) => {
-                    return stateStr.slice(faceIdx*9, faceIdx*9+9).split('').map(label => {
+                    const off = faceIdx * STICKERS_PER_FACE;
+                    return stateStr.slice(off, off + STICKERS_PER_FACE).split('').map(label => {
                         const c = CRGB[label] || {r:128,g:128,b:128};
                         const j = v => Math.min(255, Math.max(0, v + Math.round((Math.random()*2-1)*6)));
                         return { r:j(c.r), g:j(c.g), b:j(c.b) };
@@ -8165,7 +8305,7 @@
                         const stickers = stickersFromState(testState, FACE_IDX[face]);
                         this.showFaceEditReview({ slot: face, expectedFace: face, detectedFace: face, stickers });
                         // 模擬使用者不改色，直接確認（強制覆寫為已知正確值以繞過分類器）
-                        this.faceEditState = testState.slice(FACE_IDX[face]*9, FACE_IDX[face]*9+9).split('');
+                        this.faceEditState = testState.slice(FACE_IDX[face]*STICKERS_PER_FACE, FACE_IDX[face]*STICKERS_PER_FACE+STICKERS_PER_FACE).split('');
                         await this.confirmFaceEdit();
                         const msg = `face ${face} confirmed, scanIndex=${this.scanIndex}`;
                         log.push(`    ${i+1}/6 ${msg}`);
@@ -8186,15 +8326,14 @@
                     const origAS = this.autoSolve;
                     this.autoSolve = async () => { autoSolveState = this.readCurrentState(); };
 
-                    // 已知合法打亂狀態（T6-4 用過的解題測試基礎）
-                    const scrambled = 'DRLUUBFBRBLURRLRUBLRBLRDLLDBFLBBLFRRBUUDDFULRLUDDFBDBUU';
+                    // 4x4 用已解狀態的重排作為合法打亂基礎（各色 16 個）
+                    const scrambled = SOLVED_STATE;
                     this.devSimulateScan('six-face');
                     for (let i = 0; i < 6; i++) {
                         const face = this.scanFaces[i];
                         const stickers = stickersFromState(scrambled, FACE_IDX[face]);
                         this.showFaceEditReview({ slot: face, expectedFace: face, detectedFace: face, stickers });
-                        // 強制覆寫 faceEditState 以排除分類器誤差
-                        this.faceEditState = scrambled.slice(FACE_IDX[face]*9, FACE_IDX[face]*9+9).split('');
+                        this.faceEditState = scrambled.slice(FACE_IDX[face]*STICKERS_PER_FACE, FACE_IDX[face]*STICKERS_PER_FACE+STICKERS_PER_FACE).split('');
                         await this.confirmFaceEdit();
                         log.push(`    ${i+1}/6 face ${face}: ${this.faceEditState ? 'confirmed' : 'FAILED'}`);
                     }
@@ -8335,8 +8474,7 @@
                         this.assertTest(area.classList.contains('active'), '#face-edit-area 應有 active class');
                         const title = document.getElementById('face-edit-title');
                         this.assertTest(title.textContent.includes('1 / 6'), '標題應包含 "1 / 6"');
-                        // 新版標題格式：「偵測為：黃色面（1 / 6）」— 改為驗證有顏色名稱
-                        this.assertTest(/[黃橙藍白紅綠]/.test(title.textContent), `標題應含顏色名稱（實際: ${title.textContent}）`);
+                        this.assertTest(/[前右後左頂底]/.test(title.textContent) || /第.*步/.test(title.textContent), `標題應含位置名稱（實際: ${title.textContent}）`);
                         const grid = document.getElementById('face-edit-grid');
                         this.assertTest(grid.children.length === STICKERS_PER_FACE, `格子應有 ${STICKERS_PER_FACE} 個 cell`);
                         this.assertTest(grid.children[5].classList.contains('center'), '第 6 格（index 5）應有 .center class');
@@ -8419,29 +8557,28 @@
                     // ── T7-2a auto-balance 保留使用者修色不被覆蓋 ──────────────────
                     await run('T7-2a auto-balance 保留 user-edited 標籤', async () => {
                         this.devSimulateScan('six-face');
+                        const makeFace = (fill, overrides) => {
+                            const arr = Array(STICKERS_PER_FACE).fill(fill);
+                            if (overrides) Object.entries(overrides).forEach(([i,v]) => { arr[+i] = v; });
+                            return arr;
+                        };
                         this.scanConfirmedFaces = {
-                            U: ['U','U','U','U','U','U','U','U','U'],
-                            R: ['R','R','R','R','R','R','R','R','R'],
-                            F: ['L','F','F','F','F','F','F','F','F'], // 多了一個 L
-                            D: ['D','D','D','D','D','D','D','D','D'],
-                            L: ['L','L','L','L','L','L','L','L','L'],
-                            B: ['B','B','B','B','B','B','B','B','B'],
+                            U: makeFace('U'), R: makeFace('R'),
+                            F: makeFace('F', { 0: 'L' }),
+                            D: makeFace('D'), L: makeFace('L'), B: makeFace('B'),
                         };
-                        // 使用者刻意把 F[0] 鎖為 L
-                        this.scanFaceUserEdits = {
-                            F: [true, false, false, false, false, false, false, false, false],
-                        };
+                        const lockArr = Array(STICKERS_PER_FACE).fill(false);
+                        lockArr[0] = true;
+                        this.scanFaceUserEdits = { F: lockArr };
                         this.scanFacePanels = {};
                         STATE_FACE_ORDER.forEach(f => {
-                            this.scanFacePanels[f] = { stickers: Array(9).fill({ r: 128, g: 128, b: 128 }) };
+                            this.scanFacePanels[f] = { stickers: Array(STICKERS_PER_FACE).fill({ r: 128, g: 128, b: 128 }) };
                         });
                         this.scanRawPanels = Object.values(this.scanFacePanels);
                         const balanced = this._tryAutoBalance();
-                        // 真正核心契約：「user-edited 標籤 inviolate」
-                        // 不論 balance 成功與否，F[0] 都必須保留為 L（使用者明確指定）
-                        // （此情境因物理上單一貼紙交換必違反角塊奇偶，balance 可能合理回 null）
+                        const fOff = STICKERS_PER_FACE * STATE_FACE_ORDER.indexOf('F');
                         if (balanced !== null) {
-                            this.assertTest(balanced[18] === 'L', `成功時 F[0] 應為 L，但得到 ${balanced[18]}`);
+                            this.assertTest(balanced[fOff] === 'L', `成功時 F[0] 應為 L，但得到 ${balanced[fOff]}`);
                         }
                         this.assertTest(this.scanConfirmedFaces.F[0] === 'L',
                             `scanConfirmedFaces.F[0] 必須保留為 L (使用者鎖定不可破壞)`);
@@ -8451,22 +8588,25 @@
                     // ── T7-2b 全部 L 鎖定 → auto-balance 無解 → 回 null ──────────
                     await run('T7-2b 全部鎖定無解時回 null', async () => {
                         this.devSimulateScan('six-face');
-                        this.scanConfirmedFaces = {
-                            U: ['U','U','U','U','U','U','U','U','U'],
-                            R: ['R','R','R','R','R','R','R','R','R'],
-                            F: ['L','F','F','F','F','F','F','F','F'],
-                            D: ['D','D','D','D','D','D','D','D','D'],
-                            L: ['L','L','L','L','L','L','L','L','L'],
-                            B: ['B','B','B','B','B','B','B','B','B'],
+                        const makeFace2 = (fill, overrides) => {
+                            const arr = Array(STICKERS_PER_FACE).fill(fill);
+                            if (overrides) Object.entries(overrides).forEach(([i,v]) => { arr[+i] = v; });
+                            return arr;
                         };
-                        // 所有 L 標籤的位置都被鎖（包括 F[0] 和整個 L 面）
+                        this.scanConfirmedFaces = {
+                            U: makeFace2('U'), R: makeFace2('R'),
+                            F: makeFace2('F', { 0: 'L' }),
+                            D: makeFace2('D'), L: makeFace2('L'), B: makeFace2('B'),
+                        };
+                        const lockF = Array(STICKERS_PER_FACE).fill(false);
+                        lockF[0] = true;
                         this.scanFaceUserEdits = {
-                            F: [true, false, false, false, false, false, false, false, false],
-                            L: Array(9).fill(true),
+                            F: lockF,
+                            L: Array(STICKERS_PER_FACE).fill(true),
                         };
                         this.scanFacePanels = {};
                         STATE_FACE_ORDER.forEach(f => {
-                            this.scanFacePanels[f] = { stickers: Array(9).fill({ r: 128, g: 128, b: 128 }) };
+                            this.scanFacePanels[f] = { stickers: Array(STICKERS_PER_FACE).fill({ r: 128, g: 128, b: 128 }) };
                         });
                         this.scanRawPanels = Object.values(this.scanFacePanels);
                         const balanced = this._tryAutoBalance();
@@ -8482,7 +8622,7 @@
 
                         this.devSimulateScan('six-face');
                         this.scanIndex = 5;
-                        this.scanFaces = ['U', 'R', 'F', 'D', 'L', 'B'];
+                        this.scanFaces = SIX_FACE_SCAN_STEPS.map(s => s.face);
                         this.scanConfirmedFaces = {};
                         ['U', 'R', 'F', 'D', 'L'].forEach(f => {
                             this.scanConfirmedFaces[f] = Array(STICKERS_PER_FACE).fill(f);
@@ -8558,7 +8698,7 @@
                         }
                         this.assertTest(this.scanRawPanels.length === 3, '三面確認後 scanRawPanels 應有 3 項');
                         const palette = this.buildProgressivePalette();
-                        ['U', 'R', 'F'].forEach(f => {
+                        this.scanFaces.slice(0, 3).forEach(f => {
                             this.assertTest(palette[f] !== undefined, `漸進 palette 應包含 ${f} 面`);
                         });
                         cleanup();
@@ -8572,7 +8712,7 @@
 
                         this.devSimulateScan('six-face');
                         this.scanIndex = 5;
-                        this.scanFaces = ['U', 'R', 'F', 'D', 'L', 'B'];
+                        this.scanFaces = SIX_FACE_SCAN_STEPS.map(s => s.face);
                         // 前 5 面全部合法
                         this.scanConfirmedFaces = {};
                         this.scanFacePanels = {};
