@@ -6986,11 +6986,35 @@
                         }
                     });
                 }
-                // Average all 4 center RGBs to anchor this slot's color in the palette
-                const centerLabs = ReductionSolver4.CENTER_IDXS.map(ci => panel.stickers[ci]).filter(Boolean).map(rgb => this.rgbToLab(rgb));
-                if (centerLabs.length > 0) {
-                    const avgCenterLab = { l: centerLabs.reduce((s,x) => s+x.l, 0)/centerLabs.length, a: centerLabs.reduce((s,x) => s+x.a, 0)/centerLabs.length, b: centerLabs.reduce((s,x) => s+x.b, 0)/centerLabs.length };
-                    palette = { ...palette, [slot]: [avgCenterLab] };
+                // 4x4 中心格打亂時可能是混色，不能用平均值覆蓋 palette。
+                // 改為：把本次拍攝的每格 Lab 按最近 canonical 色分組，
+                // 補強 palette 中尚無校準數據的面。
+                if (panel.stickers && panel.stickers.length > 0) {
+                    const canonPalette = this.buildProgressivePalette();
+                    const buckets = {};
+                    STATE_FACE_ORDER.forEach(f => { buckets[f] = []; });
+                    panel.stickers.forEach(rgb => {
+                        if (!rgb) return;
+                        const lab = this.rgbToLab(rgb);
+                        let best = null, bestD = Infinity;
+                        STATE_FACE_ORDER.forEach(f => {
+                            const refs = Array.isArray(canonPalette[f]) ? canonPalette[f] : [canonPalette[f]];
+                            const d = Math.min(...refs.map(r => this._labDist(lab, r, refs.length > 1)));
+                            if (d < bestD) { bestD = d; best = f; }
+                        });
+                        if (best) buckets[best].push(lab);
+                    });
+                    STATE_FACE_ORDER.forEach(f => {
+                        if (buckets[f].length >= 2) {
+                            const avg = {
+                                l: buckets[f].reduce((s,x) => s+x.l, 0) / buckets[f].length,
+                                a: buckets[f].reduce((s,x) => s+x.a, 0) / buckets[f].length,
+                                b: buckets[f].reduce((s,x) => s+x.b, 0) / buckets[f].length,
+                            };
+                            const existing = Array.isArray(palette[f]) ? palette[f] : [palette[f]];
+                            palette = { ...palette, [f]: [...existing, avg] };
+                        }
+                    });
                 }
                 if (restoreState && restoreState.length === STICKERS_PER_FACE) {
                     // Going back: use the user's previously-confirmed state
