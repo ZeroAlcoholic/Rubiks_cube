@@ -3977,6 +3977,7 @@
         const SOLVED_STATE = 'UUUUUUUUUUUUUUUURRRRRRRRRRRRRRRRFFFFFFFFFFFFFFFFDDDDDDDDDDDDDDDDLLLLLLLLLLLLLLLLBBBBBBBBBBBBBBBB';
         const STICKERS_PER_FACE = 16;
         const STATE_FACE_ORDER = ['U', 'R', 'F', 'D', 'L', 'B'];
+        const TOTAL_STICKERS_4 = STATE_FACE_ORDER.length * STICKERS_PER_FACE; // 96
         const FACE_TO_MATERIAL_INDEX = { R: 0, L: 1, U: 2, D: 3, F: 4, B: 5 };
         const MATERIAL_INDEX_TO_FACE = { 0: 'R', 1: 'L', 2: 'U', 3: 'D', 4: 'F', 5: 'B' };
         const MOVE_TO_ROTATION = {
@@ -4092,25 +4093,137 @@
             { face:'D', pos:'底面', instr:'翻轉方塊，<strong>底面</strong>朝向鏡頭',  rot:'↓ 底面翻前' },
         ];
 
+        // 4×4 八個角塊（每個角塊由 3 張貼紙組成，記錄全域索引）
+        // 與 test_logic_4x4.js 的 CORNERS_4 完全對齊
+        const CORNERS_4 = [
+            { name: 'UBL', idx: [0,  64, 83] },
+            { name: 'UBR', idx: [3,  19, 80] },
+            { name: 'UFL', idx: [12, 67, 32] },
+            { name: 'UFR', idx: [15, 16, 35] },
+            { name: 'DFL', idx: [48, 79, 44] },
+            { name: 'DFR', idx: [51, 28, 47] },
+            { name: 'DBL', idx: [60, 76, 95] },
+            { name: 'DBR', idx: [63, 31, 92] },
+        ];
+        // 24 邊塊 cubie（12 物理邊 × 2 cubie/邊）— 取自 ReductionSolver4._getEdgeDefs()
+        const EDGE_CUBIES_4 = [
+            [1, 82],  [2, 81],   // U-B
+            [4, 65],  [8, 66],   // U-L
+            [7, 18],  [11, 17],  // U-R
+            [13, 33], [14, 34],  // U-F
+            [49, 45], [50, 46],  // D-F
+            [52, 78], [56, 77],  // D-L
+            [55, 29], [59, 30],  // D-R
+            [61, 94], [62, 93],  // D-B
+            [20, 39], [24, 43],  // F-R
+            [23, 84], [27, 88],  // B-R
+            [36, 71], [40, 75],  // F-L
+            [87, 68], [91, 72],  // B-L
+        ];
+        const FACE_OPPOSITES = { U:'D', D:'U', L:'R', R:'L', F:'B', B:'F' };
+
         class StateValidator4 {
+            // 嚴格驗證 4×4 狀態的 piece-realizability。
+            // 回傳 { ok, errors, severity }：
+            //   severity = 'fatal'  → 格式錯（長度/字元）
+            //   severity = 'count'  → 每色數量錯
+            //   severity = 'piece'  → 數量對但 piece 結構不合法（corner/edge 重複或對面）
+            //   severity = null     → ok
+            //
+            // 注意：strict 不檢測 cube parity（一對 edge swap 是 odd permutation，
+            //       multiset 不變但 cube 不可達）— 這層由 solver 失敗 fallback 處理。
             static validate(stateStr) {
                 const errors = [];
+
+                // (a) 格式
                 if (typeof stateStr !== 'string' || stateStr.length !== 96) {
-                    return { ok: false, errors: ['狀態必須是 96 字元 URFDLB 字串（4×4）。'] };
+                    return { ok: false, errors: ['狀態必須是 96 字元 URFDLB 字串（4×4）。'], severity: 'fatal' };
                 }
                 if (!/^[URFDLB]{96}$/.test(stateStr)) {
-                    return { ok: false, errors: ['狀態只能包含 U/R/F/D/L/B。'] };
+                    return { ok: false, errors: ['狀態只能包含 U/R/F/D/L/B。'], severity: 'fatal' };
                 }
 
+                // (b) 每色 16 個
                 const counts = {};
-                for (const face of STATE_FACE_ORDER) counts[face] = 0;
+                STATE_FACE_ORDER.forEach(f => { counts[f] = 0; });
                 for (const ch of stateStr) counts[ch]++;
+                let countOk = true;
                 for (const face of STATE_FACE_ORDER) {
-                    if (counts[face] !== 16) errors.push(`${face} 貼紙數為 ${counts[face]}，必須是 16。`);
+                    if (counts[face] !== 16) {
+                        errors.push(`${face} 貼紙數為 ${counts[face]}，必須是 16。`);
+                        countOk = false;
+                    }
                 }
-                // 4×4 has no fixed centers — skip center constraint
+                if (!countOk) return { ok: false, errors, severity: 'count' };
 
-                return { ok: errors.length === 0, errors };
+                let pieceSeverity = null;
+
+                // (c) 八角塊三色須合法（含三種軸 U|D、L|R、F|B 各一）
+                for (const corner of CORNERS_4) {
+                    const c = corner.idx.map(i => stateStr[i]);
+                    const set = new Set(c);
+                    let bad = false;
+                    if (set.size !== 3) bad = true;
+                    else if (set.has('U') && set.has('D')) bad = true;
+                    else if (set.has('L') && set.has('R')) bad = true;
+                    else if (set.has('F') && set.has('B')) bad = true;
+                    else {
+                        const hasUD = set.has('U') || set.has('D');
+                        const hasLR = set.has('L') || set.has('R');
+                        const hasFB = set.has('F') || set.has('B');
+                        if (!(hasUD && hasLR && hasFB)) bad = true;
+                    }
+                    if (bad) {
+                        errors.push(`角塊 ${corner.name} 顏色組合 (${c.join(',')}) 不合法（須為一個 U/D + 一個 L/R + 一個 F/B）。`);
+                        pieceSeverity = 'piece';
+                    }
+                }
+
+                // (d) 24 邊 cubie：兩張貼紙不可同色、不可對面色
+                for (let i = 0; i < EDGE_CUBIES_4.length; i++) {
+                    const [a, b] = EDGE_CUBIES_4[i];
+                    const ca = stateStr[a], cb = stateStr[b];
+                    if (ca === cb || FACE_OPPOSITES[ca] === cb) {
+                        errors.push(`邊塊 #${i+1} (位置 ${a}/${b}) 顏色 (${ca}/${cb}) 不合法（同色或對面）。`);
+                        pieceSeverity = 'piece';
+                    }
+                }
+
+                // (e) 角塊三色組多重集合 == canonical 8 個
+                const canonicalCorners = ['BLU','BRU','FLU','FRU','DFL','DFR','BDL','BDR']
+                    .map(k => k.split('').sort().join(''));
+                const cornerKeys = CORNERS_4.map(c => c.idx.map(i => stateStr[i]).sort().join(''));
+                const expected = {};
+                canonicalCorners.forEach(k => { expected[k] = (expected[k] || 0) + 1; });
+                const got = {};
+                cornerKeys.forEach(k => { got[k] = (got[k] || 0) + 1; });
+                for (const k of new Set([...Object.keys(expected), ...Object.keys(got)])) {
+                    if ((expected[k] || 0) !== (got[k] || 0)) {
+                        errors.push(`角塊集合不符：${k} 出現 ${got[k] || 0} 次（應 ${expected[k] || 0} 次）。`);
+                        pieceSeverity = 'piece';
+                        break; // 一個訊息就夠
+                    }
+                }
+
+                // (f) 邊塊雙色組多重集合 == canonical 12 種 × 2
+                const canonicalEdges = ['UF','UR','UB','UL','DF','DR','DB','DL','FR','FL','BR','BL']
+                    .map(k => k.split('').sort().join(''));
+                const expEdge = {};
+                canonicalEdges.forEach(k => { expEdge[k] = 2; });
+                const gotEdge = {};
+                EDGE_CUBIES_4.forEach(([a,b]) => {
+                    const k = [stateStr[a], stateStr[b]].sort().join('');
+                    gotEdge[k] = (gotEdge[k] || 0) + 1;
+                });
+                for (const k of new Set([...Object.keys(expEdge), ...Object.keys(gotEdge)])) {
+                    if ((expEdge[k] || 0) !== (gotEdge[k] || 0)) {
+                        errors.push(`邊塊集合不符：${k} 出現 ${gotEdge[k] || 0} 次（應 ${expEdge[k] || 0} 次）。`);
+                        pieceSeverity = 'piece';
+                        break;
+                    }
+                }
+
+                return { ok: errors.length === 0, errors, severity: pieceSeverity };
             }
         }
 
@@ -4777,11 +4890,13 @@
                 this.faceEditSelectedColor = 'U';
                 this.scanConfirmedFaces = {};
                 // Per-slot history maps for back-navigation in six-face mode.
-                // scanConfirmedFaces[slot] = final color labels [9]
-                // scanFacePanels[slot]    = original captured panel { stickers, ... }
-                // scanFaceUserEdits[slot] = boolean array marking user-edited stickers [9]
+                // scanConfirmedFaces[slot]   = final color labels [16]
+                // scanFacePanels[slot]       = original captured panel { stickers, ... }
+                // scanFaceUserEdits[slot]    = boolean array marking user-edited stickers [16]
+                // scanFaceConfidence[slot]   = per-sticker classifier confidence [16] (number; 99 if user-edited)
                 this.scanFacePanels = {};
                 this.scanFaceUserEdits = {};
+                this.scanFaceConfidence = {};
                 // Two-shot history snapshot (for back-navigation between shots)
                 this.shotReviewHistory = [];
                 this.sessionCalib = [];
@@ -5177,6 +5292,7 @@
                 this.scanConfirmedFaces = {};
                 this.scanFacePanels = {};
                 this.scanFaceUserEdits = {};
+                this.scanFaceConfidence = {};
                 this.faceEditState = null;
                 this.faceEditOriginal = null;
                 this.faceEditSelectedColor = 'U';
@@ -6857,6 +6973,9 @@
                 allPanels.forEach(p => { rawFaces[p.expectedFace] = p.classifiedColors; });
                 const state = STATE_FACE_ORDER.map(face => (rawFaces[face] || []).join('')).join('');
                 const v = StateValidator4.validate(state);
+                const confidenceMap = this._confidenceMapFromShotPanels(
+                    [...(this.shotReviewAllEdited || []), ...this.shotReviewCurrentPanels]
+                );
                 if (v.ok) {
                     // Commit & solve
                     this.shotReviewAllEdited.push(...this.shotReviewCurrentPanels);
@@ -6864,14 +6983,11 @@
                     this._saveCalibEntries(this._collectFromShotPanels(this.shotReviewCurrentPanels));
                     this.exitShotReview(false);
                     this.closeScanner();
-                    await this._finishScanAndSolve(state, 'two-shot');
+                    await this._finishScanAndSolve(state, 'two-shot', { confidenceMap });
                     return;
                 }
-                // 兩拍模式驗證失敗：若只有 cubejs 奇偶錯誤，嘗試深度修復（與六面流程一致）
-                const onlyParity = v.errors.length > 0 &&
-                    v.errors.every(e => e.includes('cubejs') || e.includes('忠實解析'));
-                if (onlyParity) {
-                    // 把 shotReviewAllEdited+current 寫入 scanConfirmedFaces 才能用 _tryDeepAutoFix
+                // 嚴格驗證失敗：嘗試 auto-balance（greedy） — 對 piece 級錯誤可能無解
+                if (v.severity === 'piece' || v.severity === 'count') {
                     const prevConfirmed = this.scanConfirmedFaces;
                     const prevUserEdits = this.scanFaceUserEdits;
                     this.scanConfirmedFaces = {};
@@ -6885,8 +7001,7 @@
                         this.shotReviewAllEdited.push(...this.shotReviewCurrentPanels);
                         this.exitShotReview(false);
                         this.closeScanner();
-                        await this._finishScanAndSolve(fixedState, 'two-shot-deep-fix');
-                        // 還原（其實 closeScanner 也會清；保險起見）
+                        await this._finishScanAndSolve(fixedState, 'two-shot-deep-fix', { confidenceMap });
                         this.scanConfirmedFaces = prevConfirmed;
                         this.scanFaceUserEdits = prevUserEdits;
                         return;
@@ -6899,10 +7014,10 @@
                 const errMsg = v.errors.map(e => {
                     const m = e.match(/^([URFDLB]) 貼紙數為 (\d+)/);
                     if (m) return `${NAMES[m[1]]||m[1]}色有${m[2]}個（需${STICKERS_PER_FACE}）`;
-                    if (e.includes('中心格')) return '有顏色面重複';
-                    if (e.includes('cubejs')) return '奇偶校驗錯誤（自動修復試過了仍無解，可能相鄰面交界貼紙弄反）';
+                    if (e.includes('角塊')) return '角塊組合不合法（兩相鄰面標到對面色）';
+                    if (e.includes('邊塊')) return '邊塊組合不合法（兩格貼紙顏色互為對面，cube 上不可能）';
                     return e;
-                }).join('；');
+                }).slice(0, 2).join('；');
                 const hint = document.getElementById('shot-review-hint');
                 if (hint) {
                     hint.classList.add('active');
@@ -7249,6 +7364,12 @@
                 this._reEditingFace = null;
                 this.scanConfirmedFaces[slot] = [...this.faceEditState];
                 this.scanFaceUserEdits[slot] = [...(this.faceEditUserEdits || new Array(STICKERS_PER_FACE).fill(false))];
+                // 計算 per-sticker confidence — user-edited 強制 99（已確定）
+                this.scanFaceConfidence[slot] = this._computeFaceConfidence(
+                    this.pendingFacePanel.stickers,
+                    this.faceEditState,
+                    this.scanFaceUserEdits[slot]
+                );
                 if (this.pendingFacePanel) {
                     this._saveCalibEntries(this._collectFromFaceEdit(
                         this.pendingFacePanel.stickers, this.faceEditState, this.faceEditOriginal
@@ -7270,23 +7391,25 @@
                 if (allSixConfirmed) {
                     const state = STATE_FACE_ORDER.map(f => (this.scanConfirmedFaces[f] || []).join('')).join('');
                     const v = StateValidator4.validate(state);
+                    const confidenceMap = { ...this.scanFaceConfidence };
                     if (v.ok) {
                         this.closeScanner();
-                        await this._finishScanAndSolve(state, 'six-face');
+                        await this._finishScanAndSolve(state, 'six-face', { confidenceMap });
                     } else {
-                        const onlyParity = v.errors.length > 0 &&
-                            v.errors.every(e => e.includes('cubejs') || e.includes('忠實解析'));
-                        if (onlyParity) {
+                        // 嘗試 auto-balance (count 或 piece severity 都可嘗試)
+                        if (v.severity === 'count' || v.severity === 'piece') {
                             const fixedState = this._tryDeepAutoFix();
                             if (fixedState) {
                                 this.closeScanner();
-                                await this._finishScanAndSolve(fixedState, 'six-face-deep-fix');
+                                await this._finishScanAndSolve(fixedState, 'six-face-deep-fix', { confidenceMap });
                                 return;
                             }
                         }
+                        // auto-balance 也失敗 — 回到最後拍攝的面繼續編輯
                         delete this.scanConfirmedFaces[slot];
                         delete this.scanFacePanels[slot];
                         delete this.scanFaceUserEdits[slot];
+                        delete this.scanFaceConfidence[slot];
                         this.scanRawPanels.pop();
                         this._palCache = null;
                         if (!isReEdit && this.scanCaptureOrder) this.scanCaptureOrder.pop();
@@ -7297,10 +7420,10 @@
                         const errMsg = v.errors.map(e => {
                             const m = e.match(/^([URFDLB]) 貼紙數為 (\d+)/);
                             if (m) return `${NAMES_ZH[m[1]]||m[1]}色${m[2]}個`;
-                            if (e.includes('中心格')) return '顏色面重複';
-                            if (e.includes('cubejs')) return '奇偶校驗錯誤';
+                            if (e.includes('角塊')) return '角塊不合法（兩面碰到對面色）';
+                            if (e.includes('邊塊')) return '邊塊不合法';
                             return e;
-                        }).join('、');
+                        }).slice(0, 2).join('、');
                         const titleEl = document.getElementById('face-edit-title');
                         if (titleEl) { titleEl.textContent = `⚠ 修色後確認（${errMsg}）`; titleEl.style.color = '#fca5a5'; }
                         const balRow = document.getElementById('face-edit-balance-row');
@@ -7344,6 +7467,7 @@
                 delete this.scanConfirmedFaces[slot];
                 delete this.scanFacePanels[slot];
                 delete this.scanFaceUserEdits[slot];
+                delete this.scanFaceConfidence[slot];
                 // Pop from scanRawPanels (most recent corresponds to scanIndex+1)
                 const idx = this.scanRawPanels.findIndex(p => p === panel);
                 if (idx >= 0) this.scanRawPanels.splice(idx, 1);
@@ -7364,6 +7488,7 @@
                 delete this.scanConfirmedFaces[face];
                 delete this.scanFacePanels[face];
                 delete this.scanFaceUserEdits[face];
+                delete this.scanFaceConfidence[face];
                 const capIdx = this.scanCaptureOrder ? this.scanCaptureOrder.indexOf(face) : -1;
                 if (capIdx >= 0) this.scanCaptureOrder.splice(capIdx, 1);
                 const rawIdx = this.scanRawPanels.findIndex(p => p === panel);
@@ -8137,7 +8262,9 @@
                         const balRow = document.getElementById('face-edit-balance-row');
                         if (balRow) balRow.style.display = 'none';
                         this.closeScanner();
-                        await this._finishScanAndSolve(fixed, 'deep-auto-fix');
+                        await this._finishScanAndSolve(fixed, 'deep-auto-fix', {
+                            confidenceMap: { ...this.scanFaceConfidence },
+                        });
                         return;
                     }
                 }
@@ -8386,19 +8513,26 @@
                     assert(classifyOk === 6, `全部 6 色分類正確（${classifyOk}/6）`);
                 }
 
-                // ─── 測試 4：StateValidator4 對打亂狀態回傳合法 ──────────────
-                log.push('\n=== T-E2E-4：StateValidator4 驗證合法打亂狀態 ===');
+                // ─── 測試 4：StateValidator4 嚴格驗證 ──────────────────────────
+                log.push('\n=== T-E2E-4：StateValidator4 嚴格驗證 ===');
                 {
-                    // 96 字元 4×4 valid scrambled（U/R 首格互換，各色仍各 16）
-                    const scrambled = 'R' + 'U'.repeat(15) + 'U' + 'R'.repeat(15) + 'F'.repeat(16) + 'D'.repeat(16) + 'L'.repeat(16) + 'B'.repeat(16);
-                    const v = StateValidator4.validate(scrambled);
-                    assert(v.ok, `scrambled state 通過驗證（${v.ok ? 'ok' : v.errors.join(', ')})`);
+                    // SOLVED 必須通過
                     const vi = StateValidator4.validate(SOLVED_STATE);
                     assert(vi.ok, `solved state 通過驗證`);
-                    // 96 字元但 U 數量錯（U:15，R:17）→ 不合法
+
+                    // 數量錯（U:15，R:17）→ 不合法 + severity=count
                     const bad = 'R' + SOLVED_STATE.slice(1);
                     const vb = StateValidator4.validate(bad);
                     assert(!vb.ok, `非法 state（數量錯誤）被正確拒絕`);
+                    assert(vb.severity === 'count', `count 錯應 severity=count（實際：${vb.severity}）`);
+
+                    // 數量對但 corner 三色不合法 → severity=piece
+                    // U[0] ↔ R[3]: 兩格對換保持 count，但 UBL=(R,L,B) 有 LR 對面 + UBR=(U,U,B) 重複
+                    const arr = SOLVED_STATE.split('');
+                    [arr[0], arr[19]] = [arr[19], arr[0]];
+                    const vp = StateValidator4.validate(arr.join(''));
+                    assert(!vp.ok, `count 對但 piece 錯應被擋下`);
+                    assert(vp.severity === 'piece', `piece 錯應 severity=piece（實際：${vp.severity}）`);
                 }
 
                 // ─── 測試 5：兩張快速掃描（two-shot）流程 ────────────────────
@@ -9277,19 +9411,127 @@
                 }
             }
 
+            // 最低 handoff 信心閾值。低於此值的格子必須使用者明確確認過。
+            // 與 test_logic_4x4.js handoffGate 的 MIN_HANDOFF_CONFIDENCE 對齊。
+            static get MIN_HANDOFF_CONFIDENCE() { return 1.5; }
+
+            // 給 confirmFaceEdit 用：對每張貼紙計算 classifier confidence。
+            // 使用者明確改過的格子 → 99（已確定）。
+            _computeFaceConfidence(rgbs, faceLabels, userEdits) {
+                const palette = this.buildProgressivePalette();
+                const result = [];
+                for (let i = 0; i < STICKERS_PER_FACE; i++) {
+                    if (userEdits && userEdits[i]) {
+                        result.push(99);
+                        continue;
+                    }
+                    const rgb = rgbs && rgbs[i];
+                    if (!rgb) { result.push(99); continue; }
+                    const r = this.classifyRgbWithConfidence(rgb, palette);
+                    // Specular / 深陰影：物理上資訊已失真，confidence 上限 1.4
+                    let conf = r.confidence;
+                    if (rgb.r >= 248 || rgb.g >= 248 || rgb.b >= 248) conf = Math.min(conf, 1.4);
+                    if (Math.max(rgb.r, rgb.g, rgb.b) < 55) conf = Math.min(conf, 1.4);
+                    result.push(conf);
+                }
+                return result;
+            }
+
+            // 從 shotReviewCurrentPanels 重建 face→confidence 對映（兩拍模式）
+            _confidenceMapFromShotPanels(panels) {
+                const map = {};
+                (panels || []).forEach(p => {
+                    if (!p.expectedFace) return;
+                    map[p.expectedFace] = [...(p.confidence || new Array(STICKERS_PER_FACE).fill(99))];
+                });
+                return map;
+            }
+
+            // 把 face-major confidence map 攤平成 96-elem array（對齊 state 字串順序）
+            _flattenConfidence(map) {
+                const out = new Array(TOTAL_STICKERS_4).fill(99);
+                STATE_FACE_ORDER.forEach((face, fi) => {
+                    const arr = (map && map[face]) || [];
+                    for (let i = 0; i < STICKERS_PER_FACE; i++) {
+                        out[fi * STICKERS_PER_FACE + i] = (typeof arr[i] === 'number') ? arr[i] : 99;
+                    }
+                });
+                return out;
+            }
+
+            // 找出 confidence < threshold 的 (face, localIdx) 清單
+            _lowConfidencePositions(map, threshold) {
+                const lows = [];
+                STATE_FACE_ORDER.forEach(face => {
+                    const arr = (map && map[face]) || [];
+                    for (let i = 0; i < STICKERS_PER_FACE; i++) {
+                        if (typeof arr[i] === 'number' && arr[i] < threshold) {
+                            lows.push({ face, idx: i, conf: arr[i] });
+                        }
+                    }
+                });
+                return lows;
+            }
+
             // 集中所有「掃描完成 → 設狀態 → 自動解題」的入口，提供：
-            // 1. 診斷 log（可在 console 過濾 [SCAN]）
-            // 2. localStorage 持久化，掃描結果不會因為解題失敗而消失
-            // 3. autoSolve 失敗時把實際錯誤顯示給使用者（之前是 unhandled promise rejection 悄悄吃掉）
-            async _finishScanAndSolve(state, source) {
+            // 1. 嚴格 state 驗證（StateValidator4）— 不合法直接擋
+            // 2. confidence gate — 任一格 < MIN_HANDOFF_CONFIDENCE 且未經使用者修色 → 阻擋並提示
+            // 3. localStorage 持久化（含 state + confidence + raw RGBs）— 失敗可診斷
+            // 4. autoSolve 失敗時把實際錯誤顯示給使用者
+            //
+            // confidenceMap: { face: [16 numbers] } 可選；缺省時當作每格高信心
+            // override: true 時跳過 confidence gate（使用者明確「即使如此仍解題」）
+            async _finishScanAndSolve(state, source, options = {}) {
+                const confidenceMap = options.confidenceMap || null;
+                const override = !!options.overrideConfidence;
                 console.log(`[SCAN][${source}] state = ${state}`);
                 console.log(`[SCAN][${source}] facets = U:${state.slice(0,16)} R:${state.slice(16,32)} F:${state.slice(32,48)} D:${state.slice(48,64)} L:${state.slice(64,80)} B:${state.slice(80,96)}`);
+
+                // (A) 嚴格驗證 — 不合法直接擋下並告知使用者
+                const v = StateValidator4.validate(state);
+
+                // (B) 信心 gate — 找出疑慮格
+                const lows = confidenceMap ? this._lowConfidencePositions(confidenceMap, RubiksGame.MIN_HANDOFF_CONFIDENCE) : [];
+
+                // (C) 持久化 — 不管成功失敗都寫，方便事後診斷
                 try {
+                    const rawByFace = {};
+                    STATE_FACE_ORDER.forEach(f => {
+                        const panel = this.scanFacePanels && this.scanFacePanels[f];
+                        if (panel && panel.stickers) rawByFace[f] = panel.stickers;
+                    });
                     localStorage.setItem('rubiks_last_scan', JSON.stringify({
-                        state, source, timestamp: Date.now()
+                        state, source, timestamp: Date.now(),
+                        validation: { ok: v.ok, severity: v.severity, errors: v.errors },
+                        confidence: confidenceMap,
+                        lowCount: lows.length,
+                        rawRgbsByFace: rawByFace,
                     }));
                 } catch (e) { console.warn('[SCAN] localStorage 寫入失敗', e); }
 
+                // (D) 不合法 — 永遠擋下
+                if (!v.ok) {
+                    console.error(`[SCAN][${source}] 嚴格驗證失敗 severity=${v.severity}`, v.errors);
+                    this._showHandoffError({
+                        kind: 'invalid',
+                        severity: v.severity,
+                        errors: v.errors,
+                        state, source, confidenceMap,
+                    });
+                    return;
+                }
+
+                // (E) 低信心 — 擋下，並提供「修色」或「即使如此仍解題」兩個出口
+                if (!override && lows.length > 0) {
+                    console.warn(`[SCAN][${source}] 信心 gate：${lows.length} 格 < ${RubiksGame.MIN_HANDOFF_CONFIDENCE}`);
+                    this._showHandoffError({
+                        kind: 'low-confidence',
+                        lows, state, source, confidenceMap,
+                    });
+                    return;
+                }
+
+                // (F) 通過所有 gate — setState + autoSolve
                 try {
                     this.setState(state);
                     console.log(`[SOLVE][${source}] setState 完成，準備呼叫 autoSolve...`);
@@ -9297,7 +9539,76 @@
                     console.log(`[SOLVE][${source}] autoSolve 完成`);
                 } catch (error) {
                     console.error(`[SOLVE][${source}] 失敗:`, error);
-                    alert(`解題失敗：${error.message}\n\n你的掃描結果已保留在 localStorage（rubiks_last_scan），可隨時回讀。`);
+                    this._showHandoffError({
+                        kind: 'solver-fail',
+                        message: error.message,
+                        state, source, confidenceMap,
+                    });
+                }
+            }
+
+            // 集中錯誤顯示 — 不再讓 alert() 直接綁死流程，而是給使用者明確的下一步動作
+            _showHandoffError(info) {
+                const FACE_ZH = { U:'黃', R:'橙', F:'藍', D:'白', L:'紅', B:'綠' };
+                let title = '', msg = '', nextSteps = [];
+
+                if (info.kind === 'invalid') {
+                    if (info.severity === 'fatal') {
+                        title = '掃描結果格式異常';
+                        msg = info.errors.join('\n');
+                    } else if (info.severity === 'count') {
+                        title = '顏色數量不對';
+                        msg = info.errors.map(e => {
+                            const m = e.match(/^([URFDLB]) 貼紙數為 (\d+)/);
+                            return m ? `${FACE_ZH[m[1]] || m[1]}色 ${m[2]} 個（應 16 個）` : e;
+                        }).join('\n');
+                    } else { // piece
+                        title = '方塊組合不合法（無法在實體方塊上達成）';
+                        msg = info.errors.slice(0, 3).map(e =>
+                            e.replace(/^角塊 (\w+) /, `角塊 $1：`)
+                             .replace(/^邊塊 (#\d+)/, '邊塊 $1：')
+                        ).join('\n');
+                        if (info.errors.length > 3) msg += `\n（另有 ${info.errors.length - 3} 項，請開 console 看完整訊息）`;
+                    }
+                    nextSteps = [
+                        '1. 回到掃描器 → 重新檢查每面顏色',
+                        '2. 點擊「重新掃描」可重來',
+                    ];
+                } else if (info.kind === 'low-confidence') {
+                    title = '部分貼紙顏色不確定，請逐一確認';
+                    const byFace = {};
+                    info.lows.forEach(l => {
+                        byFace[l.face] = (byFace[l.face] || 0) + 1;
+                    });
+                    msg = STATE_FACE_ORDER
+                        .filter(f => byFace[f])
+                        .map(f => `${FACE_ZH[f]}色面 ${byFace[f]} 格信心不足`)
+                        .join('、');
+                    msg += `\n\n（信心閾值：${RubiksGame.MIN_HANDOFF_CONFIDENCE}×；低於此值代表 classifier 無法明確區分兩種顏色）`;
+                    nextSteps = [
+                        '回到掃描器修正這些格子（推薦）',
+                        '即使如此仍解題（若你確定這些格子是對的）',
+                    ];
+                } else { // solver-fail
+                    title = '解題演算法失敗';
+                    msg = info.message || '未知錯誤';
+                    nextSteps = ['重新檢查掃描結果，或開 F12 console 看詳細訊息'];
+                }
+
+                console.log(`[SCAN] handoff blocked: ${info.kind}`, info);
+                // 簡易實作：alert 顯示 — 後續可改為 in-app modal。
+                const fullMsg = `${title}\n\n${msg}\n\n${nextSteps.join('\n')}\n\n（掃描結果已保留在 localStorage：rubiks_last_scan）`;
+                if (info.kind === 'low-confidence') {
+                    const proceed = confirm(`${fullMsg}\n\n按「確定」即使如此仍解題，按「取消」回去修正。`);
+                    if (proceed) {
+                        // 使用者明確 override — 重跑
+                        this._finishScanAndSolve(info.state, info.source + '-override', {
+                            confidenceMap: info.confidenceMap,
+                            overrideConfidence: true,
+                        });
+                    }
+                } else {
+                    alert(fullMsg);
                 }
             }
 
