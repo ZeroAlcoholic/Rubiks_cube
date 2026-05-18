@@ -7359,8 +7359,32 @@
                     else if (avg > 2.0) alignHtml = ` <span style="color:#fbbf24">○ 微調 ${avg.toFixed(1)}px</span>`;
                     else alignHtml = ` <span style="color:#86efac">✓ 對位精準</span>`;
                 }
-                hint.innerHTML = `<span style="font-size:0.72rem">${html}</span>${alignHtml}`;
+                // 拍攝品質摘要：飽和（過曝）與深陰影格子數
+                let exposureHtml = '';
+                if (this.pendingFacePanel && Array.isArray(this.pendingFacePanel.stickers)) {
+                    const quality = RubiksGame._assessCaptureQuality(this.pendingFacePanel.stickers);
+                    if (quality.saturated >= 4) {
+                        exposureHtml = ` <span style="color:#fca5a5" title="過多飽和像素 — 建議避免直射光">☀ 過曝 ${quality.saturated} 格</span>`;
+                    } else if (quality.shadow >= 4) {
+                        exposureHtml = ` <span style="color:#fca5a5" title="過多陰影像素 — 建議補光">◗ 過暗 ${quality.shadow} 格</span>`;
+                    } else if (quality.saturated >= 2 || quality.shadow >= 2) {
+                        exposureHtml = ` <span style="color:#fbbf24">○ 光線不均 (☀${quality.saturated}/◗${quality.shadow})</span>`;
+                    }
+                }
+                hint.innerHTML = `<span style="font-size:0.72rem">${html}</span>${alignHtml}${exposureHtml}`;
                 hint.style.color = '';
+            }
+
+            // 評估拍攝品質：每張貼紙的 RGB 進入飽和（>=248）或陰影（max<55）視為失真
+            // 回傳 { saturated, shadow, total }
+            static _assessCaptureQuality(stickers) {
+                let saturated = 0, shadow = 0;
+                for (const rgb of stickers) {
+                    if (!rgb) continue;
+                    if (rgb.r >= 248 || rgb.g >= 248 || rgb.b >= 248) saturated++;
+                    else if (Math.max(rgb.r, rgb.g, rgb.b) < 55) shadow++;
+                }
+                return { saturated, shadow, total: stickers.length };
             }
 
             retakeFaceEdit() {

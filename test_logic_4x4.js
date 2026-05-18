@@ -636,6 +636,61 @@ function simulateUndo() {
     check(sim.undo() === false, 'stack 已耗盡，undo 回 false');
 }
 
+// ============================================================
+console.log('\n=== T8: 拍攝品質評估 (capture quality) ===');
+function assessCaptureQuality(stickers) {
+    let saturated = 0, shadow = 0;
+    for (const rgb of stickers) {
+        if (!rgb) continue;
+        if (rgb.r >= 248 || rgb.g >= 248 || rgb.b >= 248) saturated++;
+        else if (Math.max(rgb.r, rgb.g, rgb.b) < 55) shadow++;
+    }
+    return { saturated, shadow, total: stickers.length };
+}
+{
+    // 全部正常曝光
+    const normal = Array.from({ length: 16 }, () => ({ r: 120, g: 130, b: 140 }));
+    const q = assessCaptureQuality(normal);
+    check(q.saturated === 0 && q.shadow === 0, '正常曝光無警告');
+}
+{
+    // 全部過曝（直射光打到方塊）
+    const overexposed = Array.from({ length: 16 }, () => ({ r: 250, g: 250, b: 250 }));
+    const q = assessCaptureQuality(overexposed);
+    check(q.saturated === 16, '完全過曝偵測到 16 格');
+}
+{
+    // 全部過暗（黑暗環境）
+    const dark = Array.from({ length: 16 }, () => ({ r: 30, g: 35, b: 40 }));
+    const q = assessCaptureQuality(dark);
+    check(q.shadow === 16, '完全過暗偵測到 16 格');
+}
+{
+    // 混合：4 格過曝 + 12 格正常
+    const mixed = Array.from({ length: 16 }, (_, i) =>
+        i < 4 ? { r: 250, g: 250, b: 250 } : { r: 120, g: 130, b: 140 });
+    const q = assessCaptureQuality(mixed);
+    check(q.saturated === 4 && q.shadow === 0, '混合曝光：4 格過曝');
+}
+{
+    // 邊界值：r=247 不算過曝
+    const borderline = Array.from({ length: 16 }, () => ({ r: 247, g: 200, b: 150 }));
+    const q = assessCaptureQuality(borderline);
+    check(q.saturated === 0, '邊界值 247 不算過曝');
+}
+{
+    // 邊界值：max=54 算過暗
+    const dimBorder = Array.from({ length: 16 }, () => ({ r: 30, g: 54, b: 20 }));
+    const q = assessCaptureQuality(dimBorder);
+    check(q.shadow === 16, '邊界值 max=54 算過暗');
+}
+{
+    // null 元素不應 crash
+    const withNulls = [null, ...Array.from({ length: 15 }, () => ({ r: 100, g: 100, b: 100 }))];
+    const q = assessCaptureQuality(withNulls);
+    check(q.saturated === 0 && q.shadow === 0, 'null 元素被跳過');
+}
+
 // Expose helpers (set BEFORE summary so a child runner that imports us still gets them)
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {

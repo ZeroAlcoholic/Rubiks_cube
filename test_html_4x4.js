@@ -196,6 +196,23 @@ console.log('\n=== HTML _verifyReducedState contract ===');
         '錯誤原因應包含「邊塊」', `reason=${r.reason}`);
 }
 
+console.log('\n=== HTML _assessCaptureQuality contract ===');
+{
+    const qualityBody = extractMethodBody(html, '_assessCaptureQuality');
+    const ctx3 = { console };
+    vm.createContext(ctx3);
+    vm.runInContext(`
+        function _assessCaptureQuality(stickers) { ${qualityBody} }
+        this._assessCaptureQuality = _assessCaptureQuality;
+    `, ctx3);
+    const normal = Array.from({ length: 16 }, () => ({ r: 120, g: 120, b: 120 }));
+    const overexp = Array.from({ length: 16 }, () => ({ r: 250, g: 250, b: 250 }));
+    const dark = Array.from({ length: 16 }, () => ({ r: 30, g: 30, b: 30 }));
+    check(ctx3._assessCaptureQuality(normal).saturated === 0, 'HTML normal → 0 saturated');
+    check(ctx3._assessCaptureQuality(overexp).saturated === 16, 'HTML overexposed → 16 saturated');
+    check(ctx3._assessCaptureQuality(dark).shadow === 16, 'HTML dark → 16 shadow');
+}
+
 console.log('\n=== HTML _isValidState3 contract ===');
 {
     // SOLVED 3×3 應通過
