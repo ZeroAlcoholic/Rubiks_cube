@@ -9311,6 +9311,26 @@
                 const reducer = new ReductionSolver4();
                 const { moveList, state3 } = reducer.solve(state);
 
+                // 套用 reduction 產生的 moves 到原始 state，得到 reduce 後的 4×4 狀態
+                // — 用此狀態檢查中心與邊塊配對是否真的完成。
+                const reducedState = RubiksGame._applyMoveList(state, moveList);
+                const reduceCheck = RubiksGame._verifyReducedState(reducedState);
+                if (!reduceCheck.ok) {
+                    // 解題器化簡失敗 — 餵給 cubejs 也是垃圾，直接拒絕
+                    const err = new Error(
+                        `Reduction 化簡未完成（${reduceCheck.reason}）— 4×4 求解器目前對此狀態無解，請改試其他角度重新掃描。`
+                    );
+                    err.reductionFailed = true;
+                    err.reduceCheck = reduceCheck;
+                    err.scrambledState = state;
+                    throw err;
+                }
+
+                // 額外驗證 state3 確實是合法 3×3 狀態（6 種中心色 + 對應 piece 合法）
+                if (!RubiksGame._isValidState3(state3)) {
+                    throw new Error('Reduction 產生的 3×3 狀態格式不合法，求解器拒絕送交 cubejs。');
+                }
+
                 onStatus('正在計算 3×3 解法…');
                 const kResult = await this.solver.solve(state3, onStatus);
 
@@ -9322,6 +9342,60 @@
                     moves: allMoves,
                     elapsed: kResult.elapsed || 0,
                 };
+            }
+
+            // 套用 move list 到 96-char state — 純 string 運算，不動 3D
+            // 與 ReductionSolver4._applyMove 邏輯一致，但獨立可用於後驗證
+            static _applyMoveList(state, moves) {
+                let s = state;
+                for (const n of moves) {
+                    const perm = PERMS_4[n];
+                    if (!perm) continue;
+                    const arr = s.split('');
+                    const res = new Array(96);
+                    for (let i = 0; i < 96; i++) res[perm[i]] = arr[i];
+                    s = res.join('');
+                }
+                return s;
+            }
+
+            // 驗證 reduce 後的 4×4 狀態：
+            //   - 中心格：每面 4 個 (idx 5,6,9,10) 全為該 face 字母
+            //   - 邊塊：12 對 edge cubie 的 sticker pair 應該配對
+            static _verifyReducedState(state) {
+                const CENTER_IDXS = [5, 6, 9, 10];
+                for (let fi = 0; fi < STATE_FACE_ORDER.length; fi++) {
+                    const face = STATE_FACE_ORDER[fi];
+                    const base = fi * 16;
+                    for (const ci of CENTER_IDXS) {
+                        if (state[base + ci] !== face) {
+                            return { ok: false, reason: `${face} 面中心未就位 (idx ${base + ci}=${state[base + ci]})` };
+                        }
+                    }
+                }
+                const EDGE_DEFS = [
+                    [1,82,2,81],[4,65,8,66],[7,18,11,17],[13,33,14,34],
+                    [49,45,50,46],[52,78,56,77],[55,29,59,30],[61,94,62,93],
+                    [20,39,24,43],[23,84,27,88],[36,71,40,75],[87,68,91,72],
+                ];
+                let unpaired = 0;
+                for (const e of EDGE_DEFS) {
+                    const c1 = state[e[0]], c2 = state[e[1]];
+                    const c3 = state[e[2]], c4 = state[e[3]];
+                    if (!(c1 === c3 && c2 === c4)) unpaired++;
+                }
+                if (unpaired > 0) {
+                    return { ok: false, reason: `${unpaired} 對邊塊未完成配對` };
+                }
+                return { ok: true };
+            }
+
+            // 檢查 3×3 狀態的基本合法性 — 6 種中心色（位置 4,13,22,31,40,49）必須是 6 種不同字母
+            static _isValidState3(state3) {
+                if (typeof state3 !== 'string' || state3.length !== 54) return false;
+                if (!/^[URFDLB]{54}$/.test(state3)) return false;
+                const centers = [4, 13, 22, 31, 40, 49].map(i => state3[i]);
+                return new Set(centers).size === 6;
             }
 
             startSolveGuide(moves) {
@@ -9566,13 +9640,15 @@
                 try {
                     this.setState(state);
                     console.log(`[SOLVE][${source}] setState 完成，準備呼叫 autoSolve...`);
-                    await this.autoSolve();
+                    await this.autoSolve({ propagateErrors: true });
                     console.log(`[SOLVE][${source}] autoSolve 完成`);
                 } catch (error) {
                     console.error(`[SOLVE][${source}] 失敗:`, error);
                     this._showHandoffError({
                         kind: 'solver-fail',
                         message: error.message,
+                        reductionFailed: !!error.reductionFailed,
+                        reduceCheck: error.reduceCheck || null,
                         state, source, confidenceMap,
                     });
                 }
@@ -9620,10 +9696,23 @@
                         '回到掃描器修正這些格子（推薦）',
                         '即使如此仍解題（若你確定這些格子是對的）',
                     ];
-                } else { // solver-fail
-                    title = '解題演算法失敗';
-                    msg = info.message || '未知錯誤';
-                    nextSteps = ['重新檢查掃描結果，或開 F12 console 看詳細訊息'];
+                } else if (info.kind === 'solver-fail') {
+                    // 區分 reduction 化簡失敗（已知 solver 限制）vs 一般失敗
+                    if (info.reductionFailed) {
+                        title = '4×4 化簡求解器目前無法處理此狀態';
+                        msg = `${info.reduceCheck && info.reduceCheck.reason ? info.reduceCheck.reason + '\n\n' : ''}（目前的 reduction 演算法為啟發式版本，對部分 scrambled 狀態無法可靠化簡到 3×3。掃描結果本身是合法的，是求解器的限制。）`;
+                        nextSteps = [
+                            '1. 嘗試先用實體方塊轉幾步打亂角度後再掃（給 solver 不同起點）',
+                            '2. 或回到 3D 模型自行操作（不依賴自動解題）',
+                        ];
+                    } else {
+                        title = '解題演算法失敗';
+                        msg = info.message || '未知錯誤';
+                        nextSteps = ['重新檢查掃描結果，或開 F12 console 看詳細訊息'];
+                    }
+                } else {
+                    title = '未知錯誤';
+                    msg = String(info.message || '');
                 }
 
                 console.log(`[SCAN] handoff blocked: ${info.kind}`, info);
@@ -9679,10 +9768,11 @@
                 }
             }
 
-            async autoSolve() {
+            async autoSolve(options = {}) {
                 const solveBtnText = document.getElementById('solve-text');
                 if (this.isAnimating || this.isSolving) return;
 
+                const propagateErrors = !!options.propagateErrors;
                 this.isSolving = true;
                 solveBtnText.innerText = "讀取狀態...";
                 document.getElementById('win-msg').style.opacity = '0';
@@ -9707,6 +9797,10 @@
                 } catch (error) {
                     console.error('[SOLVE] 失敗:', error);
                     solveBtnText.innerText = "解題失敗";
+                    if (propagateErrors) {
+                        // 重新拋出 — 讓 _finishScanAndSolve 的 _showHandoffError 處理
+                        throw error;
+                    }
                     alert(`解題失敗：${error.message}\n\n（按 F12 開 console 看詳細訊息）`);
                 } finally {
                     this.isSolving = false;
