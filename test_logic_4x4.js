@@ -565,6 +565,77 @@ function handoffGate(state, perStickerConfidence) {
     check(g.ok, '未提供 confidence → 只看 state，SOLVED 通過');
 }
 
+// ============================================================
+console.log('\n=== T7: 面編輯 undo 行為（純邏輯版） ===');
+// 模擬 _faceEditUndoStack：每次點擊 push 前一狀態；undo pop 後還原。
+function simulateUndo() {
+    let faceEditState = ['U','U','U','U','U','U','U','U','U','U','U','U','U','U','U','U'];
+    let faceEditUserEdits = new Array(16).fill(false);
+    const undoStack = [];
+
+    function click(idx, newColor) {
+        undoStack.push({
+            idx, prevColor: faceEditState[idx],
+            prevUserEdit: faceEditUserEdits[idx],
+        });
+        if (undoStack.length > 30) undoStack.shift();
+        faceEditState[idx] = newColor;
+        faceEditUserEdits[idx] = true;
+    }
+    function undo() {
+        if (undoStack.length === 0) return false;
+        const last = undoStack.pop();
+        faceEditState[last.idx] = last.prevColor;
+        faceEditUserEdits[last.idx] = last.prevUserEdit;
+        return true;
+    }
+
+    return { click, undo, getState: () => faceEditState.join(''), getEdits: () => [...faceEditUserEdits] };
+}
+{
+    const sim = simulateUndo();
+    sim.click(0, 'R');
+    sim.click(1, 'F');
+    sim.click(2, 'D');
+    check(sim.getState() === 'RFDUUUUUUUUUUUUU', 'three clicks 套用成功');
+    check(sim.getEdits().slice(0,3).every(x => x === true), 'userEdits 標記三格');
+    sim.undo();
+    check(sim.getState() === 'RFUUUUUUUUUUUUUU', 'undo 還原第三次');
+    check(sim.getEdits()[2] === false, '第三格的 userEdit 也被還原');
+    sim.undo();
+    sim.undo();
+    check(sim.getState() === 'UUUUUUUUUUUUUUUU', 'undo 三次回到初始');
+    check(sim.undo() === false, '空 stack 的 undo 回傳 false 不爆');
+}
+{
+    // 同格連續編輯，undo 應依序回退
+    const sim = simulateUndo();
+    sim.click(5, 'R');
+    sim.click(5, 'F');
+    sim.click(5, 'D');
+    check(sim.getState()[5] === 'D', '同格三次編輯，最後是 D');
+    sim.undo();
+    check(sim.getState()[5] === 'F', 'undo 1 → F');
+    sim.undo();
+    check(sim.getState()[5] === 'R', 'undo 2 → R');
+    sim.undo();
+    check(sim.getState()[5] === 'U', 'undo 3 → 原始 U');
+}
+{
+    // 超過 30 步應自動丟掉最早的
+    const sim = simulateUndo();
+    for (let i = 0; i < 40; i++) sim.click(0, i % 2 === 0 ? 'R' : 'F');
+    // 此時 state[0] 為最後一次 click 的顏色（i=39 → 'F'）
+    check(sim.getState()[0] === 'F', '40 次點擊後最後狀態正確');
+    // undo 30 次回到第 10 次點擊後的狀態（i=9 → 'F' 因為 9 是奇數 → 'F'）
+    // 實際：被保留的是後 30 次，即 i=10..39。undo 30 次後回到 i=10 點擊前 = i=9 的結果。
+    // i=9 是 'F'。所以 undo 30 後應是 F。
+    for (let i = 0; i < 30; i++) sim.undo();
+    check(sim.getState()[0] === 'F', 'undo 30 次後是 i=9 的結果 F');
+    // 再 undo 應失敗（stack 空）
+    check(sim.undo() === false, 'stack 已耗盡，undo 回 false');
+}
+
 // Expose helpers (set BEFORE summary so a child runner that imports us still gets them)
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
