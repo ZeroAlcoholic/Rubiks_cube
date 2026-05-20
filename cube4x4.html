@@ -4788,7 +4788,10 @@
 
             async ensureInitialized(onStatus) {
                 this.ensureAvailable();
-                if (this.initialized) return;
+                if (this.initialized) {
+                    console.log('[KOCIEMBA] 命中預熱快取，跳過初始化');
+                    return;
+                }
                 if (onStatus) onStatus('初始化 Kociemba two-phase solver...');
                 await new Promise(resolve => setTimeout(resolve, 30));
                 const started = performance.now();
@@ -10803,6 +10806,29 @@
                     window.game.drawScannerOverlayLoop();
                     window.game.updateTestStatus('diag', 'scanner ui preview');
                 }, 0);
+            } else {
+                // Cube.initSolver() 同步建構約 12M 條目的 BFS pruning tables
+                // （桌機 3-5s，手機 5-15s）。趁使用者掃描的閒置時間先把表建好，
+                // 避免解題時主執行緒卡死、按鈕停在「初始化 Kociemba」訊息。
+                const preloadKociemba = () => {
+                    if (!window.Cube || typeof Cube.initSolver !== 'function') return;
+                    const solver = window.game && window.game.solver;
+                    if (!solver || solver.initialized) return;
+                    try {
+                        const t0 = performance.now();
+                        console.log('[KOCIEMBA] 背景預熱 Cube.initSolver() — 開始');
+                        Cube.initSolver();
+                        solver.initialized = true;
+                        console.log(`[KOCIEMBA] 背景預熱完成 (${Math.round(performance.now() - t0)}ms)`);
+                    } catch (e) {
+                        console.warn('[KOCIEMBA] 預熱失敗（首次解題時會自動重試）:', e);
+                    }
+                };
+                if (typeof requestIdleCallback === 'function') {
+                    requestIdleCallback(preloadKociemba, { timeout: 5000 });
+                } else {
+                    setTimeout(preloadKociemba, 2000);
+                }
             }
         };
 
