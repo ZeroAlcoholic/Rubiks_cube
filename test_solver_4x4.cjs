@@ -12,7 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const ref = require('./test_logic_4x4.js');
+const ref = require('./test_logic_4x4.cjs');
 
 const html = fs.readFileSync(path.join(__dirname, 'cube4x4.html'), 'utf8');
 

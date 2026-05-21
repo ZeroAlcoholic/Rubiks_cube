@@ -39,7 +39,7 @@ vm.createContext(context);
 vm.runInContext(cornersBlock + '\n' + validatorBlock + '\nthis.StateValidator4 = StateValidator4;', context);
 const StateValidator4 = context.StateValidator4;
 
-const ref = require('./test_logic_4x4.js');
+const ref = require('./test_logic_4x4.cjs');
 
 let pass = 0, fail = 0;
 const failures = [];

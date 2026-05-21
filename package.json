@@ -1,0 +1,18 @@
+{
+  "name": "rubiks_cube",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Scan-to-learn Rubik's cube web app family (3×3, 4×4, 5×5).",
+  "license": "SEE LICENSE IN docs/",
+  "scripts": {
+    "test:smoke":    "node test/core/test_modules_smoke.js",
+    "test:geometry": "node test/core/test_geometry_n.js",
+    "test:logic":    "node test_logic.cjs && node test_logic_4x4.cjs",
+    "test:html":     "node test_html_4x4.cjs",
+    "test:solver":   "node test_solver_4x4.cjs",
+    "test:core":     "node test/core/test_modules_smoke.js && node test/core/test_geometry_n.js",
+    "test:all":      "npm run test:core && npm run test:logic && npm run test:html && npm run test:solver",
+    "serve":         "python -m http.server 8000"
+  }
+}

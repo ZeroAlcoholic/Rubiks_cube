@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>ES Modules 驗證頁 — rubiks_cube</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }
+        h1 { font-size: 1.5em; }
+        .test { padding: 8px 12px; margin: 4px 0; border-radius: 4px; }
+        .pass { background: #d1fae5; color: #065f46; }
+        .fail { background: #fee2e2; color: #991b1b; }
+        .info { background: #dbeafe; color: #1e40af; }
+        pre { background: #f3f4f6; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 12px; }
+        #summary { font-size: 1.2em; padding: 12px; margin-top: 16px; border-radius: 6px; }
+    </style>
+</head>
+<body>
+    <h1>ES Modules 驗證頁</h1>
+    <p>本頁驗證 <code>core/infra/</code> 與 <code>core/solver/solver-types.js</code> 可以透過 ES Modules 正確載入。</p>
+    <p><strong>注意</strong>：必須透過 HTTP 伺服器開啟（<code>file://</code> 不支援 ES Modules）。
+       本地測試：<code>python -m http.server 8000</code> 後開 <code>http://localhost:8000/test_modules.html</code>。</p>
+    <div id="results"></div>
+    <div id="summary"></div>
+
+    <script type="module">
+        const results = document.getElementById('results');
+        const summary = document.getElementById('summary');
+        let pass = 0, fail = 0;
+
+        function check(name, cond, extra) {
+            const div = document.createElement('div');
+            div.className = 'test ' + (cond ? 'pass' : 'fail');
+            div.innerHTML = `${cond ? '✓' : '✗'} ${name}` + (extra ? ` <small>${extra}</small>` : '');
+            results.appendChild(div);
+            cond ? pass++ : fail++;
+        }
+
+        function info(text) {
+            const div = document.createElement('div');
+            div.className = 'test info';
+            div.innerHTML = 'ℹ ' + text;
+            results.appendChild(div);
+        }
+
+        function showPre(text) {
+            const pre = document.createElement('pre');
+            pre.textContent = text;
+            results.appendChild(pre);
+        }
+
+        try {
+            // T1: 載入 logger
+            const loggerMod = await import('./core/infra/logger.js');
+            check('logger.js 模組載入', typeof loggerMod.logger === 'object');
+            check('logger.scan 為 function', typeof loggerMod.logger.scan === 'function');
+            check('logger.solve 為 function', typeof loggerMod.logger.solve === 'function');
+            check('logger.dumpRecentEvents 為 function', typeof loggerMod.dumpRecentEvents === 'function');
+
+            // 試呼叫
+            loggerMod.logger.scan('module-test', { ok: true });
+            const events = loggerMod.dumpRecentEvents();
+            check('logger.scan 寫入 ring buffer', events.some(e => e.event === 'module-test'));
+
+            // T2: 載入 errors
+            const errorsMod = await import('./core/infra/errors.js');
+            check('errors.js 模組載入', typeof errorsMod.AppError === 'function');
+            check('AppError extends Error', new errorsMod.AppError('test') instanceof Error);
+            check('ValidationError 有 severity 欄位',
+                new errorsMod.ValidationError('x', { severity: 'fatal', errors: [] }).severity === 'fatal');
+            check('SolverError 有 phase 欄位',
+                new errorsMod.SolverError('x', { phase: 'centers' }).phase === 'centers');
+            check('AppError.toJSON 可序列化',
+                JSON.stringify(new errorsMod.AppError('test', { kind: 'X' })).includes('"kind":"X"'));
+
+            // T3: 載入 perf
+            const perfMod = await import('./core/infra/perf.js');
+            check('perf.js 模組載入', typeof perfMod.perf === 'object');
+            check('perf.start 為 function', typeof perfMod.perf.start === 'function');
+
+            const endMeasure = perfMod.perf.start('test-label');
+            await new Promise(r => setTimeout(r, 50));
+            const ms = endMeasure();
+            check('perf.start() / end() 回傳合理 ms', ms >= 45 && ms < 200, `實際: ${ms}ms`);
+
+            // T4: 載入 solver-types
+            const typesMod = await import('./core/solver/solver-types.js');
+            check('solver-types.js 模組載入', typeof typesMod.SOLVER_TYPES_VERSION === 'string');
+            check('SOLVER_TYPES_VERSION 為 1.0.0', typesMod.SOLVER_TYPES_VERSION === '1.0.0');
+
+            // T5: 跨模組互相 import 也 OK（errors.js 應該 import logger）
+            try {
+                const err = new errorsMod.SolverError('test', { phase: 'centers', state: 'XYZ' });
+                loggerMod.logger.error('test-error', err.toJSON());
+                check('errors + logger 跨模組協作', true);
+            } catch (e) {
+                check('errors + logger 跨模組協作', false, e.message);
+            }
+
+            // T6: import.meta.url 可用（檢測現代瀏覽器支援）
+            check('import.meta.url 支援', typeof import.meta.url === 'string');
+
+            info('全部模組依賴正常，ES Modules 在此環境可用。');
+
+        } catch (e) {
+            check('FATAL: 模組載入過程錯誤', false, e.message);
+            showPre(e.stack || String(e));
+        }
+
+        summary.className = fail === 0 ? 'pass' : 'fail';
+        summary.textContent = fail === 0
+            ? `✅ 全部 ${pass} 項通過。ES Modules 在本環境可正常運作，可進入 Phase 1。`
+            : `❌ ${fail} 項失敗 / ${pass} 項通過。請檢查上面紅色項目。`;
+    </script>
+</body>
+</html>
