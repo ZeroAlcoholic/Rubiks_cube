@@ -184,6 +184,19 @@
             color: #86efac;
         }
         .guide-progress { flex: 1; color: #d1fae5; font-size: 0.95rem; }
+        .guide-teaching {
+            font-size: 0.78rem;
+            line-height: 1.55;
+            color: rgba(209, 250, 229, 0.78);
+            padding: 7px 10px;
+            margin: 4px 0 10px;
+            background: rgba(134, 239, 172, 0.06);
+            border-left: 2px solid rgba(134, 239, 172, 0.35);
+            border-radius: 4px;
+            max-height: 90px;
+            overflow-y: auto;
+        }
+        .guide-teaching:empty { display: none; }
         .guide-controls { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
         .guide-footer { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
         .guide-speed-label { font-size: 0.75rem; color: rgba(255,255,255,0.4); white-space: nowrap; }
@@ -763,6 +776,7 @@
             <div id="guide-notation" class="notation-badge">-</div>
             <div id="guide-progress" class="guide-progress">尚未載入解法</div>
         </div>
+        <div id="guide-teaching" class="guide-teaching"></div>
         <div class="guide-controls">
             <button class="btn" onclick="game.previousGuideStep()">⏮ 上一步</button>
             <button id="guide-play-btn" class="btn solve-btn" onclick="game.toggleGuideAutoPlay()">▶ 開始解題</button>
@@ -1973,7 +1987,8 @@
         // before calling solve(). preload() builds the centers BFS tables (~6s) and prewarms
         // cstimer's internal IDA* tables.
         import { ReductionSolver } from './core/solver/reduction.js';
-        const solver = new ReductionSolver({ N: 4 });
+        import { TEACHING_4X4 } from './content/teaching-4x4.js';
+        const solver = new ReductionSolver({ N: 4, teaching: TEACHING_4X4 });
         const ready = solver.preload().then(() => solver);
         window.__reduction = { solver, ready };
     </script>
@@ -7382,8 +7397,10 @@
                     '3x3-kociemba': '3️⃣ 當 3×3 解',
                 };
                 const allMoves = [];
+                const teachingByPhase = {};
                 for (const phase of result.phases) {
                     const isReduction = phase.name !== '3x3-kociemba';
+                    if (phase.teachingNote) teachingByPhase[phase.name] = phase.teachingNote;
                     for (const m of phase.moves) {
                         allMoves.push({
                             notation:   m.notation,
@@ -7408,6 +7425,7 @@
                 return {
                     algorithm: allMoves.map(m => m.notation).join(' '),
                     moves:     allMoves,
+                    teachingByPhase,
                     elapsed,
                 };
             }
@@ -7466,12 +7484,13 @@
                 return new Set(centers).size === 6;
             }
 
-            startSolveGuide(moves) {
+            startSolveGuide(moves, teachingByPhase = {}) {
                 this._closeAllPanels();
                 this.guideMoves = moves.slice();
                 this.guideIndex = 0;
                 this.executedGuideMoves = [];
                 this.isGuideAutoPlaying = false;
+                this.guideTeaching = teachingByPhase || {};
                 document.getElementById('solve-guide').classList.remove('hidden');
                 this.updateSolveGuide();
             }
@@ -7519,6 +7538,15 @@
                     playBtn.innerText = '▶ 開始解題';
                 } else {
                     playBtn.innerText = '▶ 繼續';
+                }
+
+                // Phase-aware teaching footer. Empty text hides the box via CSS
+                // (.guide-teaching:empty { display:none }).
+                const teachingEl = document.getElementById('guide-teaching');
+                if (teachingEl) {
+                    const idx = Math.min(this.guideIndex, this.guideMoves.length - 1);
+                    const phaseName = this.guideMoves.length > 0 ? this.guideMoves[idx]?.phaseName : null;
+                    teachingEl.textContent = (this.guideTeaching && phaseName) ? (this.guideTeaching[phaseName] || '') : '';
                 }
             }
 
@@ -8032,7 +8060,7 @@
                         return;
                     }
 
-                    this.startSolveGuide(solution.moves);
+                    this.startSolveGuide(solution.moves, solution.teachingByPhase);
                     console.log('[SOLVE] 解題方案已載入，等待使用者按下開始');
                 } catch (error) {
                     console.error('[SOLVE] 失敗:', error);
@@ -8781,7 +8809,7 @@
                             this.setState(SOLVED_STATE);
                             for (const move of "R U R' U'".split(/\s+/)) await this.applyNotationMove(move, false);
                             const solution = await this.buildSolutionForCurrentState(() => {});
-                            this.startSolveGuide(solution.moves);
+                            this.startSolveGuide(solution.moves, solution.teachingByPhase);
                             while (this.guideIndex < this.guideMoves.length) {
                                 await this.nextGuideStep(false);
                             }
@@ -8808,7 +8836,7 @@
                             this.setState(SOLVED_STATE);
                             for (const move of "F R U R' U' F'".split(/\s+/)) await this.applyNotationMove(move, false);
                             const solution = await this.buildSolutionForCurrentState(() => {});
-                            this.startSolveGuide(solution.moves);
+                            this.startSolveGuide(solution.moves, solution.teachingByPhase);
                             const oldDelay = this.guideDelayMs, oldAnim = this.guideAnimMs;
                             this.guideDelayMs = 1; this.guideAnimMs = 1;
                             await this.toggleGuideAutoPlay();
