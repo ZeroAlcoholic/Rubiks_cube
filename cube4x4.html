@@ -190,6 +190,27 @@
         .guide-speed-btn { font-size: 0.75rem !important; padding: 3px 11px !important; opacity: 0.45; transition: opacity 0.15s; }
         .guide-speed-btn.active { opacity: 1; border-color: rgba(134,239,172,0.55) !important; color: #86efac !important; }
         .guide-close-btn { margin-left: auto; font-size: 0.78rem; opacity: 0.55; }
+
+        /* Solver Bench panel (dev mode: ?bench=1) */
+        .bench-panel {
+            position: fixed; top: 16px; right: 16px; z-index: 60;
+            background: rgba(8, 14, 12, 0.92); border: 1px solid rgba(134, 239, 172, 0.35);
+            border-radius: 10px; padding: 14px 16px; color: #d1fae5;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.85rem; min-width: 320px; max-width: 420px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        }
+        .bench-panel.hidden { display: none; }
+        .bench-panel h3 { margin: 0 0 8px 0; font-size: 0.95rem; color: #86efac; letter-spacing: 1px; }
+        .bench-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+        .bench-row label { color: rgba(255,255,255,0.55); font-size: 0.78rem; }
+        .bench-row input { background: #0a1410; border: 1px solid rgba(134,239,172,0.25); color: #d1fae5; padding: 3px 6px; border-radius: 4px; width: 60px; font: inherit; }
+        .bench-btn { background: rgba(134,239,172,0.15); border: 1px solid rgba(134,239,172,0.4); color: #86efac; padding: 4px 10px; border-radius: 4px; cursor: pointer; font: inherit; }
+        .bench-btn:hover { background: rgba(134,239,172,0.25); }
+        .bench-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .bench-output { white-space: pre; font-size: 0.78rem; line-height: 1.4; color: #e0f2e8; margin-top: 8px; max-height: 380px; overflow-y: auto; background: #050a08; padding: 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.08); }
+        .bench-progress { color: #fbbf24; }
+
         .scanner-view {
             position: relative;
             width: 100%;
@@ -721,6 +742,21 @@
     </div>
 
     <div id="win-msg">挑戰成功!<br>PERFECT!</div>
+
+    <!-- Solver Bench (dev mode: append ?bench=1 to URL) -->
+    <div id="solver-bench" class="bench-panel hidden">
+        <h3>🧪 SOLVER BENCH</h3>
+        <div class="bench-row">
+            <label>scrambles:</label>
+            <input id="bench-count" type="number" value="20" min="1" max="500">
+            <label>depth:</label>
+            <input id="bench-depth" type="number" value="25" min="1" max="60">
+            <button id="bench-run" class="bench-btn" onclick="game.runSolverBench()">Run</button>
+            <button class="bench-btn" onclick="game.closeSolverBench()">✕</button>
+        </div>
+        <div id="bench-output" class="bench-output">Ready. Click Run.</div>
+    </div>
+
     <div id="canvas-container"></div>
     <div id="solve-guide" class="solve-guide hidden">
         <div class="guide-main">
@@ -7310,16 +7346,31 @@
 
                 onStatus('正在計算解法…');
                 const started = performance.now();
+                // Track current phase label so onProgress can append elapsed/attempt
+                // info without losing the "which phase" context.
+                let currentPhaseLabel = '正在計算解法';
                 const result = await reducer.solve(state, {
                     onStatus: (event, data) => {
                         if (event !== 'phase-start') return;
                         const labels = {
-                            centers:        '計算中心歸位…',
-                            edges:          '計算邊塊配對…',
-                            parity:         '計算 parity 修正…',
-                            '3x3-kociemba': '計算 3×3 收尾…',
+                            centers:        '計算中心歸位',
+                            edges:          '計算邊塊配對',
+                            parity:         '計算 parity 修正',
+                            '3x3-kociemba': '計算 3×3 收尾',
                         };
-                        if (labels[data.name]) onStatus(labels[data.name]);
+                        if (labels[data.name]) {
+                            currentPhaseLabel = labels[data.name];
+                            onStatus(currentPhaseLabel + '…');
+                        }
+                    },
+                    onProgress: (info) => {
+                        // Surface live progress between cstimer rotation attempts —
+                        // cstimer's IDA* is synchronous, so this ticks once per
+                        // rotation boundary (~30 ms to ~3 s). Pre-move tag appears
+                        // only when we cross into the symmetry-fallback path.
+                        const sec = (info.elapsedMs / 1000).toFixed(1);
+                        const preTag = info.pre === 'none' ? '' : ` +${info.pre}`;
+                        onStatus(`${currentPhaseLabel}… ${sec}s · rot ${info.attempts}/${info.total}${preTag}`);
                     },
                 });
                 const elapsed = Math.round((performance.now() - started) * 100) / 100;
@@ -7813,6 +7864,148 @@
                 } catch (e) {
                     alert('讀取失敗：' + e.message);
                 }
+            }
+
+            // ─── Solver Bench (dev mode) ────────────────────────────────────────
+            // Headless solver runner that bypasses 3D animation. Collects telemetry
+            // (rotIdx, preMove, per-phase move counts, wall time) for each solve and
+            // renders a summary histogram + distribution into #bench-output.
+            openSolverBench() {
+                const panel = document.getElementById('solver-bench');
+                if (panel) panel.classList.remove('hidden');
+            }
+            closeSolverBench() {
+                const panel = document.getElementById('solver-bench');
+                if (panel) panel.classList.add('hidden');
+            }
+
+            async runSolverBench() {
+                const out = document.getElementById('bench-output');
+                const runBtn = document.getElementById('bench-run');
+                const N = Math.max(1, Math.min(500, parseInt(document.getElementById('bench-count').value || '20', 10)));
+                const depth = Math.max(1, Math.min(60, parseInt(document.getElementById('bench-depth').value || '25', 10)));
+
+                if (!window.__reduction) { out.textContent = 'ReductionSolver module not loaded'; return; }
+                runBtn.disabled = true;
+                out.innerHTML = '<span class="bench-progress">Preparing solver…</span>';
+
+                const reducer = await window.__reduction.ready;
+                const perms = reducer.perms;
+                const allMoves = Object.keys(perms);
+                const applyOne = (s, m) => { const p = perms[m]; const a = s.split(''); const r = new Array(96); for (let i = 0; i < 96; i++) r[p[i]] = a[i]; return r.join(''); };
+                const randScramble = () => {
+                    let state = SOLVED_STATE, last = '';
+                    for (let i = 0; i < depth; i++) {
+                        let m; do { m = allMoves[Math.floor(Math.random() * allMoves.length)]; } while (m[0] === last[0]);
+                        state = applyOne(state, m); last = m;
+                    }
+                    return state;
+                };
+
+                const records = [];
+                const t0 = performance.now();
+                for (let i = 0; i < N; i++) {
+                    const scrambled = randScramble();
+                    const ts = performance.now();
+                    let r, err = null;
+                    try { r = await reducer.solve(scrambled); }
+                    catch (e) { err = e.message; }
+                    const elapsed = performance.now() - ts;
+
+                    let ok = false;
+                    if (r) {
+                        const moves = r.phases.flatMap(p => p.moves.map(mv => mv.notation));
+                        let final = scrambled;
+                        for (const mv of moves) final = applyOne(final, mv);
+                        ok = (final === SOLVED_STATE);
+                    }
+
+                    records.push({
+                        ok, err, elapsed,
+                        rotIdx: r?.telemetry?.rotIdx ?? -1,
+                        pre:    r?.telemetry?.pre    ?? 'n/a',
+                        phases: r ? r.phases.map(p => p.moves.length) : null,
+                        totalMoves: r?.totalMoves ?? 0,
+                    });
+
+                    if ((i + 1) % 2 === 0 || i === N - 1) {
+                        out.innerHTML = `<span class="bench-progress">${i + 1}/${N}  (elapsed ${((performance.now() - t0)/1000).toFixed(1)}s)</span>`;
+                        await new Promise(r => setTimeout(r, 0));
+                    }
+                }
+                const totalElapsed = performance.now() - t0;
+
+                // ── Aggregate ─────────────────────────────────────────────
+                const passed = records.filter(r => r.ok).length;
+                const times  = records.map(r => r.elapsed).sort((a, b) => a - b);
+                const median = times[Math.floor(times.length / 2)] || 0;
+                const p95    = times[Math.floor(times.length * 0.95)] || 0;
+                const max    = times[times.length - 1] || 0;
+                const min    = times[0] || 0;
+                const mean   = times.reduce((s, x) => s + x, 0) / Math.max(times.length, 1);
+
+                const rotHist = {};
+                const preHist = {};
+                for (const r of records) {
+                    if (r.ok) {
+                        rotHist[r.rotIdx] = (rotHist[r.rotIdx] || 0) + 1;
+                        preHist[r.pre]    = (preHist[r.pre]    || 0) + 1;
+                    }
+                }
+                const sortedRots = Object.entries(rotHist).sort((a, b) => b[1] - a[1]);
+                const sortedPres = Object.entries(preHist).sort((a, b) => b[1] - a[1]);
+
+                // Time buckets
+                const buckets = [
+                    { label: '<100ms',  max: 100 },
+                    { label: '<500ms',  max: 500 },
+                    { label: '<1s',     max: 1000 },
+                    { label: '<3s',     max: 3000 },
+                    { label: '<10s',    max: 10000 },
+                    { label: '<30s',    max: 30000 },
+                    { label: '≥30s',    max: Infinity },
+                ];
+                const counts = buckets.map(() => 0);
+                for (const t of times) {
+                    for (let i = 0; i < buckets.length; i++) {
+                        if (t < buckets[i].max) { counts[i]++; break; }
+                    }
+                }
+                const maxBucket = Math.max(...counts);
+                const barWidth = 18;
+                const histLines = buckets.map((b, i) => {
+                    const filled = maxBucket === 0 ? 0 : Math.round((counts[i] / maxBucket) * barWidth);
+                    const bar = '█'.repeat(filled) + '·'.repeat(barWidth - filled);
+                    return `  ${b.label.padEnd(7)} ${bar} ${counts[i]}`;
+                });
+
+                const lines = [
+                    `Bench: ${N} scrambles, depth=${depth} — ${(totalElapsed/1000).toFixed(1)}s total`,
+                    `Pass:  ${passed}/${N} (${(passed/N*100).toFixed(1)}%)`,
+                    ``,
+                    `Time distribution (ms):`,
+                    `  min=${min.toFixed(0)}  median=${median.toFixed(0)}  mean=${mean.toFixed(0)}  p95=${p95.toFixed(0)}  max=${max.toFixed(0)}`,
+                    ...histLines,
+                    ``,
+                    `Rotation index hits (top 10):`,
+                    ...sortedRots.slice(0, 10).map(([idx, n]) => `  rot ${String(idx).padStart(2)}: ${'■'.repeat(Math.round(n/Math.max(sortedRots[0][1],1)*barWidth))} ${n}`),
+                    ``,
+                    `Pre-move usage:`,
+                    ...sortedPres.map(([p, n]) => `  ${p.padEnd(8)} ${'■'.repeat(Math.round(n/Math.max(sortedPres[0][1],1)*barWidth))} ${n}`),
+                ];
+                out.textContent = lines.join('\n');
+
+                // Persist most-recent run for offline analysis
+                try {
+                    localStorage.setItem('rubiks_bench_last', JSON.stringify({
+                        timestamp: Date.now(), N, depth,
+                        stats: { passed, min, median, mean, p95, max, totalElapsed },
+                        rotHist, preHist, buckets: counts,
+                        records: records.map(r => ({ ok: r.ok, ms: r.elapsed, rotIdx: r.rotIdx, pre: r.pre, totalMoves: r.totalMoves })),
+                    }));
+                } catch (e) { /* localStorage quota — ignore */ }
+
+                runBtn.disabled = false;
             }
 
             async autoSolve(options = {}) {
@@ -8736,6 +8929,12 @@
         window.onload = () => {
             window.game = new RubiksGame();
             const params = new URLSearchParams(window.location.search);
+            if (params.get('bench') === '1') {
+                // Dev-mode solver bench panel. Module load is async, so wait for it.
+                const showBench = () => window.game.openSolverBench();
+                if (window.__reduction) window.__reduction.ready.then(showBench);
+                else setTimeout(showBench, 500);
+            }
             if (params.get('test') === '1') {
                 setTimeout(() => window.game.runPhase1Tests({ silent: params.get('silent') === '1' }), 0);
             } else if (params.get('test') === '2') {
