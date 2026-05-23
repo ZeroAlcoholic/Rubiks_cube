@@ -7448,9 +7448,16 @@
                 } else {
                     const current = this.guideMoves[this.guideIndex];
                     notation.innerText = current ? current.notation : '?';
-                    progress.innerText = notStarted
+
+                    // Phase-aware progress: count moves within the current stageLabel group
+                    // so the user sees "1️⃣ 中心歸位 · 第 3/19 步" rather than the absolute index.
+                    const phaseInfo = this._guidePhaseInfo();
+                    const stepText = notStarted && phaseInfo == null
                         ? `共 ${this.guideMoves.length} 步，按開始播放`
-                        : `第 ${this.guideIndex + 1} / ${this.guideMoves.length} 步`;
+                        : phaseInfo
+                            ? `${phaseInfo.label} · 第 ${phaseInfo.idxInPhase} / ${phaseInfo.phaseLen} 步`
+                            : `第 ${this.guideIndex + 1} / ${this.guideMoves.length} 步`;
+                    progress.innerText = stepText;
                 }
 
                 if (this.isGuideAutoPlaying) {
@@ -7464,6 +7471,24 @@
                 }
             }
 
+            // Find the current move's phase label and its position within that phase.
+            // Returns null if the moves carry no stageLabel (e.g., synthetic test sequences).
+            _guidePhaseInfo() {
+                if (!this.guideMoves || this.guideMoves.length === 0) return null;
+                const idx = Math.min(this.guideIndex, this.guideMoves.length - 1);
+                const label = this.guideMoves[idx]?.stageLabel;
+                if (!label) return null;
+                let phaseStart = idx;
+                while (phaseStart > 0 && this.guideMoves[phaseStart - 1].stageLabel === label) phaseStart--;
+                let phaseEnd = idx;
+                while (phaseEnd < this.guideMoves.length - 1 && this.guideMoves[phaseEnd + 1].stageLabel === label) phaseEnd++;
+                return {
+                    label,
+                    idxInPhase: idx - phaseStart + 1,
+                    phaseLen:   phaseEnd - phaseStart + 1,
+                };
+            }
+
             async nextGuideStep(animate = true) {
                 if (this.isAnimating || this.guideIndex >= this.guideMoves.length) {
                     if (this.guideIndex >= this.guideMoves.length) this.pauseGuideAutoPlay();
@@ -7474,7 +7499,12 @@
                 const notationEl = document.getElementById('guide-notation');
                 const progressEl = document.getElementById('guide-progress');
                 if (notationEl) notationEl.innerText = move.notation;
-                if (progressEl) progressEl.innerText = `第 ${this.guideIndex + 1} / ${this.guideMoves.length} 步`;
+                if (progressEl) {
+                    const phaseInfo = this._guidePhaseInfo();
+                    progressEl.innerText = phaseInfo
+                        ? `${phaseInfo.label} · 第 ${phaseInfo.idxInPhase} / ${phaseInfo.phaseLen} 步`
+                        : `第 ${this.guideIndex + 1} / ${this.guideMoves.length} 步`;
+                }
                 await this.applyNotationMove(move.notation, animate);
                 this.executedGuideMoves.push(move.notation);
                 this.guideIndex++;
