@@ -408,6 +408,11 @@ export class ReductionSolver {
         }
         this.N = N;
         this.teaching = teaching || {};
+        // Optional override for the cstimer caller — when set, replaces the
+        // default globalThis.scramble_444 lookup. Host (browser) attaches a
+        // worker-backed proxy here to offload genFacelet onto a Web Worker;
+        // Node tests leave this null and use the sync vendor global.
+        this.cstimerCaller = null;
         this.perms = buildPerms(N);
         this.centerIdxByFace = centerIndices(N);
         this.allCenterIdx = FACE_ORDER.flatMap(f => this.centerIdxByFace[f]);
@@ -468,10 +473,12 @@ export class ReductionSolver {
         });
 
         // Pre-warm cstimer if already loaded (idempotent: becomes no-op after first call).
-        const csTimer = globalThis.scramble_444;
+        // Prefer the injected caller so a worker-backed proxy warms in the worker thread.
+        // `await` is a no-op when init() is sync (Node vendor) and waits when async (worker).
+        const csTimer = this.cstimerCaller || globalThis.scramble_444;
         if (csTimer && typeof csTimer.init === 'function') {
             const t1 = perf.start('cstimer-init');
-            csTimer.init();
+            await csTimer.init();
             logger.solve('cstimer-prewarmed', { ms: t1() });
         }
     }
@@ -515,7 +522,7 @@ export class ReductionSolver {
             state = applyMoves(this.perms, state, centersPhase.moves.map(m => m.notation));
 
             onStatus('phase-start', { name: 'edges' });
-            const csTimer = globalThis.scramble_444;
+            const csTimer = this.cstimerCaller || globalThis.scramble_444;
             let lastTelemetry = null;
             if (csTimer) {
                 const rest = await this._solveEdgesAndBeyond(state, csTimer, {
@@ -683,7 +690,10 @@ export class ReductionSolver {
 
                 const { physMoves, relabel, conj } = _COORD_ROTS[i];
                 const rotated = _coordRotate(this.perms, baseState, physMoves, relabel);
-                const solutionStr = csTimer.genFacelet(rotated);
+                // cstimer.genFacelet may be sync (Node, direct vendor) or async
+                // (browser worker proxy). `await` is a no-op on primitives, so
+                // this works for both transports.
+                const solutionStr = await csTimer.genFacelet(rotated);
                 const tokens = solutionStr ? solutionStr.trim().split(/\s+/).filter(Boolean) : [];
                 // genFacelet returns SCRAMBLE M: applyMoves(SOLVED, M) = rotated.
                 // Solve = inverseMoves(M), then conj maps back to original frame.

@@ -16,7 +16,7 @@ const root  = join(__dir, '../..');
 
 const ctx = vm.createContext({
     Math, Date, console: { log: () => {}, error: console.error }, setTimeout, clearTimeout, clearInterval, setInterval,
-    $: { now: () => Date.now() }, DEBUG: false,
+    $: { now: () => Date.now(), isArray: (a) => Array.isArray(a) }, DEBUG: false,
     isaac: { seed: () => {}, random: () => Math.random() },
     scrMgr: { reg: function c() { return c; }, fixCase: (_t, s) => s },
     image: { llImage: { drawImage: () => {} } },

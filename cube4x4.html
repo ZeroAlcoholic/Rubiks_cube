@@ -1988,9 +1988,86 @@
         // cstimer's internal IDA* tables.
         import { ReductionSolver } from './core/solver/reduction.js';
         import { TEACHING_4X4 } from './content/teaching-4x4.js';
+
+        // ── cstimer Worker proxy ────────────────────────────────────────────
+        // Offloads the synchronous cstimer.genFacelet IDA* search onto a Web
+        // Worker so the main thread stays responsive (3D animation, UI clicks)
+        // during 30 ms – 3 s solves. Each rotation attempt becomes one postMessage
+        // round-trip; the message-payload overhead (~ms-level for 96-char state +
+        // short solution string) is negligible vs. the cstimer work itself.
+        //
+        // Falls back to the main-thread globalThis.scramble_444 if the worker
+        // fails to load (e.g. opened via file:// without a static server, or
+        // an importScripts 404 / CSP block after spawn — see onFatal below).
+        function createCstimerWorkerProxy(onFatal) {
+            let worker;
+            try {
+                worker = new Worker('workers/cstimer-worker.js');
+            } catch (err) {
+                console.warn('[cstimer-worker] failed to spawn, falling back to main thread:', err);
+                return null;
+            }
+            const pending = new Map();
+            let nextId = 0;
+            let dead = false;
+            function markDead(error) {
+                if (dead) return;
+                dead = true;
+                for (const slot of pending.values()) slot.reject(error);
+                pending.clear();
+                try { worker.terminate(); } catch {}
+                if (typeof onFatal === 'function') onFatal(error);
+            }
+            worker.onmessage = (e) => {
+                const { id, type, result, error } = e.data || {};
+                const slot = pending.get(id);
+                if (!slot) return;
+                pending.delete(id);
+                if (type === 'error')          slot.reject(new Error(error || 'cstimer-worker error'));
+                else if (type === 'init-done') slot.resolve();
+                else if (type === 'result')    slot.resolve(result || '');
+                else                            slot.reject(new Error(`cstimer-worker: unexpected response type "${type}"`));
+            };
+            // Worker script load failure (404, importScripts error, CSP block, etc.)
+            // surfaces here. We mark the proxy dead so the host can swap back to
+            // the main-thread cstimer; otherwise solve() would hang forever.
+            worker.onerror = (e) => markDead(new Error(`cstimer-worker crashed: ${e.message || e.type || 'unknown error'}`));
+            worker.onmessageerror = () => markDead(new Error('cstimer-worker: postMessage deserialization failed'));
+            function send(type, payload) {
+                if (dead) return Promise.reject(new Error('cstimer-worker is dead'));
+                const id = `m${++nextId}`;
+                return new Promise((resolve, reject) => {
+                    pending.set(id, { resolve, reject });
+                    worker.postMessage({ id, type, ...payload });
+                });
+            }
+            return {
+                init:       ()       => send('init', {}),
+                genFacelet: (state)  => send('genFacelet', { state }),
+                _worker:    worker, // exposed for diagnostics; not part of the public proxy contract
+            };
+        }
+
         const solver = new ReductionSolver({ N: 4, teaching: TEACHING_4X4 });
+        // onFatal: invoked when the worker dies after spawn (importScripts 404, etc.).
+        // We detach the broken proxy, invalidate the preload-promise cache so the
+        // next solve() re-runs preload against the main-thread cstimer, and republish
+        // window.__reduction.ready as a fresh promise (the old one is already rejected).
+        const cstimerProxy = createCstimerWorkerProxy((err) => {
+            console.warn('[cstimer-worker] fatal, falling back to main thread:', err);
+            solver.cstimerCaller = null;
+            solver._preloadPromise = null;
+            window.__reduction.viaWorker = false;
+            window.__reduction.ready = solver.preload().then(() => solver);
+        });
+        if (cstimerProxy) {
+            solver.cstimerCaller = cstimerProxy;
+            console.log('[cstimer] running in Web Worker');
+        } else {
+            console.log('[cstimer] running on main thread (worker spawn failed)');
+        }
         const ready = solver.preload().then(() => solver);
-        window.__reduction = { solver, ready };
+        window.__reduction = { solver, ready, viaWorker: !!cstimerProxy };
     </script>
 
     <script>

@@ -21,7 +21,7 @@ const root  = join(__dir, '../..');
 // cstimer-444.js expects certain globals; we set them up here.
 const ctx = vm.createContext({
     Math, Date, console, setTimeout, clearTimeout, clearInterval, setInterval,
-    $:       { now: () => Date.now() },
+    $:       { now: () => Date.now(), isArray: (a) => Array.isArray(a) },
     DEBUG:   false,
     isaac:   { seed: () => {}, random: () => Math.random() },
     scrMgr:  { reg: function c() { return c; }, fixCase: (_t, s) => s },
