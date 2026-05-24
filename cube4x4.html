@@ -2075,6 +2075,10 @@
         const STICKERS_PER_FACE = 16;
         const STATE_FACE_ORDER = ['U', 'R', 'F', 'D', 'L', 'B'];
         const TOTAL_STICKERS_4 = STATE_FACE_ORDER.length * STICKERS_PER_FACE; // 96
+        // Face-local positions (0..15) that hold a center sticker on a 4×4 face.
+        // The 4×4 face is a 4×4 grid; centers are the inner 2×2 block.
+        // Used by the HSV classifier / unfold map to read the center color of a face.
+        const CENTER_POS_4 = [5, 6, 9, 10];
         const FACE_TO_MATERIAL_INDEX = { R: 0, L: 1, U: 2, D: 3, F: 4, B: 5 };
         const MATERIAL_INDEX_TO_FACE = { 0: 'R', 1: 'L', 2: 'U', 3: 'D', 4: 'F', 5: 'B' };
         const MOVE_TO_ROTATION = {
@@ -2202,7 +2206,9 @@
             { name: 'DBL', idx: [60, 76, 95] },
             { name: 'DBR', idx: [63, 31, 92] },
         ];
-        // 24 邊塊 cubie（12 物理邊 × 2 cubie/邊）— 取自 ReductionSolver4._getEdgeDefs()
+        // 24 邊塊 cubie（12 物理邊 × 2 cubie/邊）— 與 core/solver/reduction.js 內
+        // EDGE_DEFS_4 對齊；這份在 cube4x4.html 內保留供 HSV 分類器、unfold map
+        // 等 UI 端使用，避免循環依賴。
         const EDGE_CUBIES_4 = [
             [1, 82],  [2, 81],   // U-B
             [4, 65],  [8, 66],   // U-L
@@ -2480,397 +2486,6 @@
         // Pre-compute at load time (fast, ~5ms)
         const PERMS_4 = buildPerms4();
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // ReductionSolver4 — 4×4 Rubik's cube solver (Reduction to 3×3)
-        // Phase 1: Centers (4 per face)
-        // Phase 2: Edge pairing (12 edge pairs)
-        // Phase 3: Parity fix (OLL/PLL parity)
-        // Phase 4: LBL via Kociemba on the equivalent 3×3 state
-        // ─────────────────────────────────────────────────────────────────────────
-        class ReductionSolver4 {
-            constructor() {}
-
-            // Apply one notation to a 96-char state string, return new state string
-            _applyMove(state, notation) {
-                const perm = PERMS_4[notation];
-                if (!perm) { console.warn('No perm for', notation); return state; }
-                const arr = state.split('');
-                const res = new Array(96);
-                for (let i = 0; i < 96; i++) res[perm[i]] = arr[i];
-                return res.join('');
-            }
-
-            _applySeq(state, notations, moves) {
-                let s = state;
-                for (const n of notations) { s = this._applyMove(s, n); if (moves) moves.push(n); }
-                return s;
-            }
-
-            // State helpers: face char and center indices
-            _faceOf(state, globalIdx) { return state[globalIdx]; }
-            _faceSt(face) { return 'URFDLB'.indexOf(face) * 16; } // start index of face
-
-            // Center indices within a face (0-based within face 0..15): positions 5,6,9,10
-            static CENTER_IDXS = [5, 6, 9, 10];
-
-            // Edge sticker pairs in the 4×4: 12 edge pairs, each = [idx_a, idx_b] in global state
-            // Edges are the non-center, non-corner stickers on each face edge.
-            // For each face, edge positions (0-indexed within face):
-            // Row 0: 1,2 (top edge); Row 3: 13,14 (bottom edge)
-            // Col 0: 4,8 (left edge); Col 3: 7,11 (right edge)
-            // 12 edge pairs (each pair shares a cubie):
-            static EDGE_PAIRS = [
-                // U-face edges paired with adjacent faces
-                [1, 82], [2, 81],    // U-top ↔ B-top (B col reversed)
-                [4, 67], [8, 66],    // U-left ↔ L-top
-                [7, 19], [11, 18],   // U-right ↔ R-top
-                [13, 34], [14, 33],  // U-bottom ↔ F-top
-                // Middle layer (between U and D)
-                [20, 36], [24, 37],  // R-left ↔ F-right (R row1,col0 & row2,col0)
-                [22, 47], [26, 46],  // R-right ↔ B-left (mirrored)
-                // D-face edges
-                // [48+1, 32+13], etc — derived below
-            ];
-
-            solve(state) {
-                const moveList = [];
-                state = this._solveCenters(state, moveList);
-                state = this._solveEdges(state, moveList);
-                state = this._fixParity(state, moveList);
-                // After reduction, build 3×3 equivalent and solve with Kociemba
-                const state3 = this._toState3(state);
-                return { moveList, state3 };
-            }
-
-            // ── Phase 1: Centers ──────────────────────────────────────────────────
-            _centersOk(state, face) {
-                const b = this._faceSt(face);
-                return ReductionSolver4.CENTER_IDXS.every(i => state[b + i] === face);
-            }
-
-            _solveCenters(state, moves) {
-                // Solve in order: U, D, R, L, F (B solves automatically)
-                for (const face of ['U', 'D', 'R', 'L', 'F']) {
-                    state = this._solveOneFaceCenter(state, moves, face);
-                }
-                return state;
-            }
-
-            _solveOneFaceCenter(state, moves, tgt) {
-                const MAX_ITER = 24;
-                for (let iter = 0; iter < MAX_ITER && !this._centersOk(state, tgt); iter++) {
-                    state = this._placeCenterPiece(state, moves, tgt);
-                }
-                return state;
-            }
-
-            // Find one misplaced center of color tgt and move it into tgt face
-            _placeCenterPiece(state, moves, tgt) {
-                // Find a center sticker with color tgt not in tgt face
-                const tgtBase = this._faceSt(tgt);
-                for (const ci of ReductionSolver4.CENTER_IDXS) {
-                    if (state[tgtBase + ci] === tgt) continue; // already correct
-                    // Replace it with a piece from elsewhere — first fix this slot
-                    break;
-                }
-
-                // Strategy: bring one tgt-colored center to the tgt face
-                // Find where a tgt-colored center is currently
-                let srcFace = null, srcLocalIdx = null;
-                for (const f of 'URFDLB') {
-                    if (f === tgt) continue;
-                    const base = this._faceSt(f);
-                    for (const ci of ReductionSolver4.CENTER_IDXS) {
-                        if (state[base + ci] === tgt) { srcFace = f; srcLocalIdx = ci; break; }
-                    }
-                    if (srcFace) break;
-                }
-                if (!srcFace) return state; // already all in place
-
-                state = this._moveCenterFromFace(state, moves, tgt, srcFace, srcLocalIdx);
-                return state;
-            }
-
-            // Move a center sticker from srcFace:srcLocalIdx to tgt face without disturbing tgt centers already placed
-            _moveCenterFromFace(state, moves, tgt, srcFace, srcLocalIdx) {
-                // Algs to move center from a face adjacent to tgt into tgt
-                // We use wide moves to cycle center pieces between faces
-                // Key algorithms:
-                //   Uw Rw U Rw' Uw'  — move center from R→U
-                //   Uw' Lw U' Lw' Uw — move center from L→U
-                //   Rw U Rw'          — U→F center rotation
-                //   U Rw U' Rw'       — commutator
-
-                // Orient so target face is U, source is a side face, apply alg
-                // Use setup moves to bring srcFace to the right position
-
-                const ALG_R_TO_U = ['Uw', 'Rw', 'U', "Rw'", "Uw'"]; // R→U
-                const ALG_F_TO_U = ['U', 'Rw', "U'", "Rw'"]; // rotate within U/F
-                const ALG_D_TO_U = ["Rw", "Rw'"]; // cycle D through R to U
-
-                // Map from (tgt, srcFace) to setup moves + algorithm
-                const setupMap = this._getCenterSetup(tgt, srcFace, srcLocalIdx);
-                if (setupMap) {
-                    state = this._applySeq(state, setupMap.setup, moves);
-                    state = this._applySeq(state, setupMap.alg, moves);
-                    state = this._applySeq(state, setupMap.teardown, moves);
-                }
-                return state;
-            }
-
-            _getCenterSetup(tgt, srcFace, srcLocalIdx) {
-                // Returns {setup, alg, teardown} to bring srcFace center to tgt face
-                // srcLocalIdx: 5,6,9,10 (center positions within face)
-                const row = srcLocalIdx < 8 ? 0 : 1; // 0=top row (5,6), 1=bottom row (9,10)
-                const col = (srcLocalIdx % 4) < 2 ? 0 : 1; // 0=left col (5,9), 1=right col (6,10)
-
-                // Simplified: orient cube so tgt=U and srcFace=R, then apply standard alg
-                // The setup rotations bring the cube to that orientation
-                const orient = this._getOrientAlg(tgt, srcFace);
-                if (!orient) return null;
-
-                // Position the specific center piece into the right slot on srcFace (now R)
-                // then use alg to move from R to U
-                const positionAlg = this._positionCenterInSlot(row, col);
-
-                return {
-                    setup: [...orient.setup, ...positionAlg],
-                    alg: ['Uw', 'Rw', 'U', "Rw'", "Uw'"],
-                    teardown: orient.teardown
-                };
-            }
-
-            // Whole-cube reorientations (using wide moves) to bring tgt→U, src→R
-            _getOrientAlg(tgt, src) {
-                // Map from (tgt, src) pair → {setup, teardown} using Uw/Dw/Rw/Lw/Fw/Bw
-                const map = {
-                    'U,R': { setup: [], teardown: [] },
-                    'U,F': { setup: ['U'], teardown: ["U'"] },
-                    'U,L': { setup: ['U2'], teardown: ['U2'] },
-                    'U,B': { setup: ["U'"], teardown: ['U'] },
-                    'U,D': { setup: ["Rw2"], teardown: ["Rw2"] },
-                    'R,U': { setup: ["Rw'", 'U', 'Rw'], teardown: ["Rw'", "U'", 'Rw'] },
-                    'R,F': { setup: ["Rw'"], teardown: ['Rw'] },
-                    'R,D': { setup: ["Rw'", 'U2', 'Rw'], teardown: ["Rw'", 'U2', 'Rw'] },
-                    'R,B': { setup: ['Rw', 'U2', "Rw'"], teardown: ['Rw', 'U2', "Rw'"] },
-                    'R,L': { setup: ["Rw'", 'U', "Rw'"], teardown: ['Rw', "U'", 'Rw'] },
-                    'D,F': { setup: ["Rw2", 'U'], teardown: ["U'", "Rw2"] },
-                    'D,R': { setup: ["Rw2"], teardown: ["Rw2"] },
-                    'D,B': { setup: ["Rw2", "U'"], teardown: ['U', "Rw2"] },
-                    'D,L': { setup: ["Rw2", 'U2'], teardown: ['U2', "Rw2"] },
-                    'F,U': { setup: ["Fw'"], teardown: ['Fw'] },
-                    'F,R': { setup: ["Fw'", 'U', 'Fw'], teardown: ["Fw'", "U'", 'Fw'] },
-                    'F,D': { setup: ['Fw'], teardown: ["Fw'"] },
-                    'F,L': { setup: ['Fw', "U'", "Fw'"], teardown: ['Fw', 'U', "Fw'"] },
-                    'L,U': { setup: ['Lw', "U'", "Lw'"], teardown: ['Lw', 'U', "Lw'"] },
-                    'L,F': { setup: ['Lw'], teardown: ["Lw'"] },
-                    'L,D': { setup: ["Lw'"], teardown: ['Lw'] },
-                    'B,U': { setup: ['Bw', "U'", "Bw'"], teardown: ['Bw', 'U', "Bw'"] },
-                    'B,R': { setup: ['Bw'], teardown: ["Bw'"] },
-                    'B,D': { setup: ["Bw'", "U'", 'Bw'], teardown: ["Bw'", 'U', 'Bw'] },
-                };
-                return map[`${tgt},${src}`] || { setup: ["Uw"], teardown: ["Uw'"] };
-            }
-
-            // U-rotation to bring center piece to the top-right position on R face
-            _positionCenterInSlot(row, col) {
-                // row 0=top(5,6), row 1=bottom(9,10) of srcFace (R face after orientation)
-                // col 0=left(5,9), col 1=right(6,10)
-                // Target for alg: piece at R[1][1]=21 (state index 21 within R face = global idx)
-                // Use U rotations to cycle between center slots
-                if (row === 0 && col === 0) return ["U'"]; // slot 5→to position via U'
-                if (row === 0 && col === 1) return [];     // slot 6 = already at right position
-                if (row === 1 && col === 0) return ['U'];  // slot 9
-                if (row === 1 && col === 1) return ['U2']; // slot 10
-                return [];
-            }
-
-            // ── Phase 2: Edge Pairing ────────────────────────────────────────────
-            // For 4×4, each edge has 2 stickers that must match and be on correct edge
-            _solveEdges(state, moves) {
-                // 12 edge pairs. For each, find the two matching stickers and pair them.
-                // Use standard "slice-pair" method
-                for (let attempt = 0; attempt < 12 * 4 && !this._allEdgesPaired(state); attempt++) {
-                    state = this._pairOneEdge(state, moves);
-                }
-                return state;
-            }
-
-            // An edge pair consists of 2 stickers with the same 2-color combination
-            // Paired = both stickers are on the same edge position (adjacent faces, same edge)
-            _allEdgesPaired(state) {
-                return this._getUnpairedEdges(state).length === 0;
-            }
-
-            // Returns list of unpaired edge pairs as [{faceA, posA, faceB, posB, colorA, colorB}]
-            _getUnpairedEdges(state) {
-                // Define the 12 edges of a 4×4 (each edge = 2 sticker positions)
-                const EDGES = [
-                    // U edges: [face1, local1, face2, local2] for each of the 2 stickers in an edge
-                    {a:[0,1],  b:[5,2]},  // U-top-left  ↔ B[0][2]
-                    {a:[0,2],  b:[5,1]},  // U-top-right ↔ B[0][1]
-                    {a:[0,4],  b:[3,0]},  // U-left-top  ↔ L[0][3]
-                    {a:[0,8],  b:[3,1]},  // U-left-bot  ↔ L[0][2]  hmm this is getting complex
-                    // ...
-                ];
-                // Simplified: just return a placeholder indicating there are edges to solve
-                // The actual check is done differently below
-                return this._findUnpairedEdgeStickers(state);
-            }
-
-            _findUnpairedEdgeStickers(state) {
-                // Check each of the 12 physical edges for pairing
-                // A 4×4 edge is paired when its 2 stickers have the same pair of colors
-                // AND are in the correct position relative to each other
-                const EDGE_DEFS = this._getEdgeDefs();
-                const unpaired = [];
-                for (const e of EDGE_DEFS) {
-                    const c1 = state[e[0]], c2 = state[e[1]];
-                    const c3 = state[e[2]], c4 = state[e[3]];
-                    // Paired = each sticker pair {c1,c3} and {c2,c4} are matching
-                    if (!(c1 === c3 && c2 === c4)) {
-                        unpaired.push(e);
-                    }
-                }
-                return unpaired;
-            }
-
-            // 12 edge definitions: each entry = [pos_a1, pos_b1, pos_a2, pos_b2]
-            // where a1,b1 are the two stickers of edge piece 1, a2,b2 are edge piece 2
-            _getEdgeDefs() {
-                // Based on FACE_COORDS ordering: U=0..15, R=16..31, F=32..47, D=48..63, L=64..79, B=80..95
-                // Edge positions (global state indices):
-                // U-B edge: U[0][1]=1, U[0][2]=2, B[0][2]=82, B[0][1]=81
-                // U-R edge: U[1][3]=7, U[2][3]=11, R[0][0]=16, R[0][1]=17 -- wait need to re-check
-                // This is complex; using known 4×4 edge adjacencies
-                // Each entry: [piece1_sideA, piece1_sideB, piece2_sideA, piece2_sideB]
-                // piece1_sideA + piece1_sideB must be stickers on the SAME physical cubie.
-                // Verified against FACE_COORDS: U=0..15,R=16..31,F=32..47,D=48..63,L=64..79,B=80..95
-                return [
-                    [1,  82,  2,  81], // U-B  (−0.5/+0.5,1.5,−1.5)
-                    [4,  65,  8,  66], // U-L  (−1.5,1.5,−0.5/+0.5)
-                    [7,  18, 11,  17], // U-R  (+1.5,1.5,−0.5/+0.5)
-                    [13, 33, 14, 34],  // U-F  (−0.5/+0.5,1.5,+1.5)
-                    [49, 45, 50, 46],  // D-F  (−0.5/+0.5,−1.5,+1.5)
-                    [52, 78, 56, 77],  // D-L  (−1.5,−1.5,+0.5/−0.5)
-                    [55, 29, 59, 30],  // D-R  (+1.5,−1.5,+0.5/−0.5)
-                    [61, 94, 62, 93],  // D-B  (−0.5/+0.5,−1.5,−1.5)
-                    [20, 39, 24, 43],  // F-R  (+1.5,+0.5/−0.5,+1.5)
-                    [23, 84, 27, 88],  // B-R  (+1.5,+0.5/−0.5,−1.5)
-                    [36, 71, 40, 75],  // F-L  (−1.5,+0.5/−0.5,+1.5)
-                    [87, 68, 91, 72],  // B-L  (−1.5,+0.5/−0.5,−1.5)
-                ];
-            }
-
-            _pairOneEdge(state, moves) {
-                const unpaired = this._findUnpairedEdgeStickers(state);
-                if (unpaired.length === 0) return state;
-                const edge = unpaired[0];
-
-                // Standard edge-pairing algorithm:
-                // 1. Get the two sticker colors
-                const c1 = state[edge[0]], c2 = state[edge[1]]; // face colors of 1st sticker pair
-
-                // 2. Bring matching sticker pieces to top layer using U moves and setup
-                // Use standard "slice and pair" technique:
-                // Bring sticker to FR and UR position, then: U R U' R' (pairing alg)
-                // Simplified: apply a known safe algorithm to make progress
-                const PAIR_ALGS = [
-                    // Pair front-right edge: assumes stickers at F-top and R-left
-                    ["Uw", "Rw", "U", "Rw'", "Uw'"],
-                    // Flip and try again
-                    ["U"],
-                    ["U2"],
-                    ["U'"],
-                    ["Rw", "U", "Rw'"],
-                    ["Lw'", "U'", "Lw"],
-                ];
-
-                // Try each alg and pick the one that makes the most progress
-                let best = state, bestScore = this._edgePairingScore(state);
-                for (const alg of PAIR_ALGS) {
-                    const candidate = this._applySeq(state, alg, null);
-                    const score = this._edgePairingScore(candidate);
-                    if (score > bestScore) { best = candidate; bestScore = score; }
-                }
-
-                if (best !== state) {
-                    // Find which alg was applied and record it
-                    for (const alg of PAIR_ALGS) {
-                        const candidate = this._applySeq(state, alg, null);
-                        if (candidate === best) { state = this._applySeq(state, alg, moves); break; }
-                    }
-                } else {
-                    // No progress — apply a rotation to try different setup
-                    state = this._applySeq(state, ['U'], moves);
-                }
-                return state;
-            }
-
-            _edgePairingScore(state) {
-                const defs = this._getEdgeDefs();
-                return defs.filter(e => state[e[0]]===state[e[2]] && state[e[1]]===state[e[3]]).length;
-            }
-
-            // ── Phase 3: Parity Fix ───────────────────────────────────────────────
-            _fixParity(state, moves) {
-                // OLL parity: occurs when an odd number of edges are flipped
-                // Detection: after edge pairing, check if the 3x3 equivalent has OLL parity
-                // Fix: Rw U2 x Rw U2 Rw U2 Rw' U2 Lw U2 Rw' U2 Rw U2 Rw' U2 Rw'
-                if (this._hasOLLParity(state)) {
-                    const OLL_FIX = ["Rw","U2","Rw","U2","Rw'","U2","Rw'","U2","Lw","U2","Rw'","U2","Rw","U2","Rw'","U2","Rw'"];
-                    state = this._applySeq(state, OLL_FIX, moves);
-                }
-                if (this._hasPLLParity(state)) {
-                    const PLL_FIX = ["Rw2","U2","Rw2","Uw2","Rw2","Uw2"];
-                    state = this._applySeq(state, PLL_FIX, moves);
-                }
-                return state;
-            }
-
-            _hasOLLParity(state) {
-                // Count flipped edge pairs
-                // A flip = sticker pair is matched but reversed orientation
-                const defs = this._getEdgeDefs();
-                let flipped = 0;
-                for (const e of defs) {
-                    const paired = state[e[0]]===state[e[2]] && state[e[1]]===state[e[3]];
-                    const flippedPaired = state[e[0]]===state[e[3]] && state[e[1]]===state[e[2]];
-                    if (flippedPaired && !paired) flipped++;
-                }
-                return flipped % 2 === 1;
-            }
-
-            _hasPLLParity(state) {
-                // PLL parity: two adjacent edges are in impossible swap
-                // Detected by attempting Kociemba on 3x3 equivalent — if no solution, parity exists
-                // Simple heuristic: check if the 3x3 state is solvable
-                try {
-                    const s3 = this._toState3(state);
-                    // If centers are not distinct, parity detection needs another approach
-                    const centers3 = [4, 13, 22, 31, 40, 49].map(i => s3[i]);
-                    if (new Set(centers3).size !== 6) return false; // can't detect
-                    const cube = Cube.fromString(s3);
-                    return !cube; // invalid state = parity
-                } catch { return false; }
-            }
-
-            // ── Convert 4×4 state to 3×3 equivalent ─────────────────────────────
-            // Maps each 3×3 face position to the corresponding 4×4 sticker index
-            _toState3(state) {
-                // 3×3 positions within each 4×4 face (0-indexed within the 16):
-                // corners=0,3,12,15 | edges=1,2,4,7,8,11,13,14 | centers=5,6,9,10
-                // 3×3 sticker order (9 per face): [0,1,3,4,5,7,12,13,15]
-                const MAP4to3 = [0, 1, 3, 4, 5, 7, 12, 13, 15];
-                let s3 = '';
-                for (let f = 0; f < 6; f++) {
-                    const base = f * 16;
-                    MAP4to3.forEach(i => { s3 += state[base + i]; });
-                }
-                return s3;
-            }
-        }
-
         class CubeJSSolverAdapter {
             constructor() {
                 this.initialized = false;
@@ -2897,7 +2512,7 @@
             }
 
             async solve(stateStr, onStatus) {
-                // stateStr is a 54-char 3×3 state (output of ReductionSolver4._toState3)
+                // stateStr is a 54-char 3×3 state (URFDLB facelet order)
                 if (typeof stateStr !== 'string' || stateStr.length !== 54 || !/^[URFDLB]{54}$/.test(stateStr)) {
                     throw new Error('Kociemba solver expects a 54-char 3×3 state string.');
                 }
@@ -4556,7 +4171,7 @@
                 });
 
                 const avgCenterLab = stickers => {
-                    const labs = ReductionSolver4.CENTER_IDXS.map(ci => this.rgbToLab(stickers[ci]));
+                    const labs = CENTER_POS_4.map(ci => this.rgbToLab(stickers[ci]));
                     return { l: labs.reduce((s,x) => s+x.l, 0)/labs.length, a: labs.reduce((s,x) => s+x.a, 0)/labs.length, b: labs.reduce((s,x) => s+x.b, 0)/labs.length };
                 };
                 const panelLabs = rawPanels.map(panel => avgCenterLab(panel.stickers));
@@ -4599,7 +4214,7 @@
                 });
                 const paletteLab = {};
                 STATE_FACE_ORDER.forEach(face => {
-                    const labs = ReductionSolver4.CENTER_IDXS.map(ci => this.rgbToLab(rawFaces[face][ci]));
+                    const labs = CENTER_POS_4.map(ci => this.rgbToLab(rawFaces[face][ci]));
                     paletteLab[face] = { l: labs.reduce((s,x) => s+x.l, 0)/labs.length, a: labs.reduce((s,x) => s+x.a, 0)/labs.length, b: labs.reduce((s,x) => s+x.b, 0)/labs.length };
                 });
                 return STATE_FACE_ORDER.map(face => {
@@ -4919,14 +4534,14 @@
                         }
                     });
                 }
-                const centerRgbs = ReductionSolver4.CENTER_IDXS.map(ci => panel.originalRgbs[ci]).filter(Boolean);
+                const centerRgbs = CENTER_POS_4.map(ci => panel.originalRgbs[ci]).filter(Boolean);
                 const avgR = centerRgbs.reduce((s,x) => s+x.r, 0)/centerRgbs.length;
                 const avgG = centerRgbs.reduce((s,x) => s+x.g, 0)/centerRgbs.length;
                 const avgB = centerRgbs.reduce((s,x) => s+x.b, 0)/centerRgbs.length;
                 palette[newCenterColor] = [this.rgbToLab({ r: avgR, g: avgG, b: avgB })];
                 // Reclassify non-center, non-user-edited stickers
                 for (let i = 0; i < STICKERS_PER_FACE; i++) {
-                    if (ReductionSolver4.CENTER_IDXS.includes(i)) continue;
+                    if (CENTER_POS_4.includes(i)) continue;
                     if (panel.userEdits && panel.userEdits[i]) continue;
                     const rgb = panel.originalRgbs[i];
                     const r = this.classifyRgbWithConfidence(rgb, palette);
@@ -5353,7 +4968,7 @@
                 const panel = this.pendingFacePanel;
                 let swatchHtml = '';
                 if (panel && panel.stickers) {
-                    const rgbs = ReductionSolver4.CENTER_IDXS.map(ci => panel.stickers[ci]).filter(Boolean);
+                    const rgbs = CENTER_POS_4.map(ci => panel.stickers[ci]).filter(Boolean);
                     if (rgbs.length > 0) {
                         const r = Math.round(rgbs.reduce((s,x)=>s+x.r,0)/rgbs.length);
                         const g = Math.round(rgbs.reduce((s,x)=>s+x.g,0)/rgbs.length);
@@ -5381,7 +4996,7 @@
                 for (let i = 0; i < STICKERS_PER_FACE; i++) {
                     const cell = document.createElement('div');
                     let cls = 'face-edit-cell';
-                    if (ReductionSolver4.CENTER_IDXS.includes(i)) cls += ' center';
+                    if (CENTER_POS_4.includes(i)) cls += ' center';
                     if (this.faceEditUncertain && this.faceEditUncertain[i]) cls += ' uncertain';
                     if (this.faceEditUserEdits && this.faceEditUserEdits[i]) cls += ' user-edited';
                     cell.className = cls;
@@ -5422,11 +5037,11 @@
                         }
                     });
                 }
-                const cLabs = ReductionSolver4.CENTER_IDXS.map(ci => this.rgbToLab(panel.stickers[ci]));
+                const cLabs = CENTER_POS_4.map(ci => this.rgbToLab(panel.stickers[ci]));
                 const avgCLab = { l: cLabs.reduce((s,x) => s+x.l, 0)/cLabs.length, a: cLabs.reduce((s,x) => s+x.a, 0)/cLabs.length, b: cLabs.reduce((s,x) => s+x.b, 0)/cLabs.length };
                 palette[newCenterColor] = [avgCLab];
                 for (let i = 0; i < STICKERS_PER_FACE; i++) {
-                    if (ReductionSolver4.CENTER_IDXS.includes(i)) continue;
+                    if (CENTER_POS_4.includes(i)) continue;
                     if (this.faceEditUserEdits && this.faceEditUserEdits[i]) continue;
                     const rgb = panel.stickers[i];
                     const result = this.classifyRgbWithCalibration(rgb, palette);
@@ -6479,7 +6094,7 @@
                 const makeFaceStickers = (face, centerJitter = 4, edgeJitter = 18) => {
                     const [br, bg, bb] = FACE_RGBS[face];
                     return Array.from({length: STICKERS_PER_FACE}, (_, i) => {
-                        const isCenter = ReductionSolver4.CENTER_IDXS.includes(i);
+                        const isCenter = CENTER_POS_4.includes(i);
                         const j = isCenter ? centerJitter : edgeJitter;
                         const jitter = c => Math.min(255, Math.max(0, c + Math.round((Math.random() * 2 - 1) * j)));
                         return { r: jitter(br), g: jitter(bg), b: jitter(bb) };
@@ -6495,7 +6110,7 @@
                         const slot = this.scanFaces[this.scanIndex];
                         if (!slot) return;
                         const stickers = makeFaceStickers(slot);
-                        const _dcRgbs = ReductionSolver4.CENTER_IDXS.map(ci => stickers[ci]).filter(Boolean);
+                        const _dcRgbs = CENTER_POS_4.map(ci => stickers[ci]).filter(Boolean);
                         const center = _dcRgbs.length > 0 ? { r: _dcRgbs.reduce((s,x)=>s+x.r,0)/_dcRgbs.length, g: _dcRgbs.reduce((s,x)=>s+x.g,0)/_dcRgbs.length, b: _dcRgbs.reduce((s,x)=>s+x.b,0)/_dcRgbs.length } : stickers[5];
                         const detectedFace = this.guessUnusedFaceFromCenter(center);
                         await this.flashCapture();
@@ -7507,8 +7122,8 @@
                 };
             }
 
-            // 套用 move list 到 96-char state — 純 string 運算，不動 3D
-            // 與 ReductionSolver4._applyMove 邏輯一致，但獨立可用於後驗證
+            // 套用 move list 到 96-char state — 純 string 運算，不動 3D。
+            // 用於 buildSolutionForCurrentState 的後驗證 belt-and-suspenders 檢查。
             static _applyMoveList(state, moves) {
                 let s = state;
                 for (const n of moves) {
