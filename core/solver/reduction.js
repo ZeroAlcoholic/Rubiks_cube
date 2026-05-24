@@ -509,6 +509,27 @@ export class ReductionSolver {
             }
         }
 
+        // Already-solved early-return. cstimer's genFacelet treats a SOLVED
+        // input as "no work to do" only loosely — it can return a non-empty
+        // string that round-trips to a different state under its symmetry
+        // bug, which our verify loop then "fixes" by inserting a pre-move,
+        // ending up with a 10-15 move solution to a state that needs zero
+        // moves. Short-circuit before that path can fire.
+        if (state === this.SOLVED) {
+            logger.solve('reduction-trivial', { N: this.N });
+            return {
+                phases: [
+                    { name: 'centers',        displayName: '1️⃣ 中心歸位',  moves: [] },
+                    { name: 'edges',          displayName: '2️⃣ 配對邊塊',  moves: [] },
+                    { name: 'parity',         displayName: 'Parity 修正',   moves: [] },
+                    { name: '3x3-kociemba',   displayName: '3️⃣ 當 3×3 解', moves: [] },
+                ],
+                totalMoves: 0,
+                solverName: this.name,
+                telemetry: null,
+            };
+        }
+
         await this.preload();
 
         logger.solve('reduction-start', { N: this.N });
