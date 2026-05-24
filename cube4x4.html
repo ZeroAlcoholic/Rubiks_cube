@@ -765,6 +765,7 @@
             <label>depth:</label>
             <input id="bench-depth" type="number" value="25" min="1" max="60">
             <button id="bench-run" class="bench-btn" onclick="game.runSolverBench()">Run</button>
+            <button id="bench-history-btn" class="bench-btn" onclick="game.toggleBenchHistory()">History</button>
             <button class="bench-btn" onclick="game.closeSolverBench()">✕</button>
         </div>
         <div id="bench-output" class="bench-output">Ready. Click Run.</div>
@@ -7607,6 +7608,10 @@
 
                 if (!window.__reduction) { out.textContent = 'ReductionSolver module not loaded'; return; }
                 runBtn.disabled = true;
+                // Clear any leftover history-view mode so the History button can
+                // re-show history after this run; otherwise toggleBenchHistory
+                // would interpret "we're already in history" and flip back.
+                out.dataset.mode = '';
                 out.innerHTML = '<span class="bench-progress">Preparing solver…</span>';
 
                 const reducer = await window.__reduction.ready;
@@ -7715,17 +7720,90 @@
                 ];
                 out.textContent = lines.join('\n');
 
-                // Persist most-recent run for offline analysis
+                // Persist this run to history. Keep the last N runs so we can
+                // compare across solver changes (e.g., after a rotation reorder
+                // or worker-offload commit). Drop per-record detail to keep
+                // each entry small; the aggregate stats are what we compare.
+                const entry = {
+                    timestamp: Date.now(), N, depth, scrambles: records.length,
+                    stats: { passed, min, median, mean, p95, max, totalElapsed },
+                    rotHist, preHist, buckets: counts,
+                };
                 try {
-                    localStorage.setItem('rubiks_bench_last', JSON.stringify({
-                        timestamp: Date.now(), N, depth,
-                        stats: { passed, min, median, mean, p95, max, totalElapsed },
-                        rotHist, preHist, buckets: counts,
-                        records: records.map(r => ({ ok: r.ok, ms: r.elapsed, rotIdx: r.rotIdx, pre: r.pre, totalMoves: r.totalMoves })),
-                    }));
-                } catch (e) { /* localStorage quota — ignore */ }
+                    const HISTORY_KEY = 'rubiks_bench_history';
+                    const MAX_KEEP = 20;
+                    const raw = localStorage.getItem(HISTORY_KEY);
+                    const history = raw ? JSON.parse(raw) : [];
+                    history.unshift(entry);
+                    while (history.length > MAX_KEEP) history.pop();
+                    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+                    // Keep the single-entry "last" key too for any external diagnostics
+                    // that may still reference it.
+                    localStorage.setItem('rubiks_bench_last', JSON.stringify(entry));
+                } catch (e) { console.warn('[bench] localStorage write failed:', e); }
 
                 runBtn.disabled = false;
+            }
+
+            toggleBenchHistory() {
+                // Toggle between the latest summary and the history table view.
+                // We flip via a data-mode attribute on the output element so
+                // re-clicking Run goes back to the live progress display.
+                const out = document.getElementById('bench-output');
+                if (!out) return;
+                if (out.dataset.mode === 'history') {
+                    out.dataset.mode = '';
+                    out.textContent = 'Ready. Click Run, or History again to view past runs.';
+                    return;
+                }
+                out.dataset.mode = 'history';
+                let history;
+                try {
+                    const raw = localStorage.getItem('rubiks_bench_history');
+                    history = raw ? JSON.parse(raw) : [];
+                } catch (e) { history = []; }
+                if (!history.length) {
+                    out.textContent = '(no bench history yet — click Run first)';
+                    return;
+                }
+
+                // Compact tabular view: 1 line per past run + delta-vs-latest hint.
+                const fmt = (ms) => ms < 1000 ? `${Math.round(ms)}ms` : `${(ms/1000).toFixed(1)}s`;
+                const ts = (epoch) => {
+                    const d = new Date(epoch);
+                    const mm = String(d.getMonth() + 1).padStart(2, '0');
+                    const dd = String(d.getDate()).padStart(2, '0');
+                    const hh = String(d.getHours()).padStart(2, '0');
+                    const mi = String(d.getMinutes()).padStart(2, '0');
+                    return `${mm}-${dd} ${hh}:${mi}`;
+                };
+                const latest = history[0];
+                const lines = [
+                    `Bench history (${history.length} runs kept, newest first):`,
+                    ``,
+                    `  when         N   depth runs  pass    median    mean     p95     max`,
+                    `  ───────────  ──  ──── ───── ─────  ────────  ───────  ──────  ──────`,
+                ];
+                for (const h of history) {
+                    const passRate = `${h.stats.passed}/${h.scrambles}`;
+                    lines.push(
+                        `  ${ts(h.timestamp).padEnd(11)}  ${String(h.N).padEnd(2)}  ${String(h.depth).padEnd(4)} ${String(h.scrambles).padEnd(5)} ${passRate.padEnd(6)} ${fmt(h.stats.median).padStart(8)}  ${fmt(h.stats.mean).padStart(7)}  ${fmt(h.stats.p95).padStart(6)}  ${fmt(h.stats.max).padStart(6)}`
+                    );
+                }
+                if (history.length >= 2) {
+                    const prev = history[1];
+                    const pct = (cur, old) => old === 0 ? '?' : `${cur > old ? '+' : ''}${Math.round((cur - old) / old * 100)}%`;
+                    lines.push(
+                        ``,
+                        `Latest vs previous:`,
+                        `  median: ${pct(latest.stats.median, prev.stats.median).padStart(6)}   mean: ${pct(latest.stats.mean, prev.stats.mean).padStart(6)}   p95: ${pct(latest.stats.p95, prev.stats.p95).padStart(6)}`,
+                    );
+                }
+                lines.push(
+                    ``,
+                    `(history persists in localStorage key 'rubiks_bench_history')`,
+                );
+                out.textContent = lines.join('\n');
             }
 
             async autoSolve(options = {}) {
