@@ -2060,30 +2060,23 @@
 /* END OrbitControls r128 */
 </script>
     <script src="vendor/cubejs-1.3.2.js"></script>
-    <!-- vendor/cstimer-444.js (~3 MB) intentionally NOT loaded synchronously here.
-         The Web Worker (workers/cstimer-worker.js) imports its own copy, so
-         loading it on the main thread is a 3 MB / 5–10s mobile parse cost we
-         can avoid. The createCstimerWorkerProxy onFatal handler does a dynamic
-         <script> insertion to lazy-load it only if the worker dies. -->
+    <!-- vendor/cstimer-444.js NOT loaded on the main thread.
+         workers/solver-worker.js imports its own copy via fetch+eval. We keep
+         cubejs (~700 KB) on the main thread as a small fallback target for
+         the worker-fatal path (loadLocalSolverFallback below). -->
     <script type="module">
-        // Load the modular 4×4 ReductionSolver (centers BFS + cstimer edges/parity/3×3).
-        // Expose on window for the legacy inline RubiksGame to consume; classic <script>
-        // blocks run before this module, so the inline code must await window.__reduction.ready
-        // before calling solve(). preload() builds the centers BFS tables (~6s) and prewarms
-        // cstimer's internal IDA* tables.
-        import { ReductionSolver } from './core/solver/reduction.js';
-        import { TEACHING_4X4 } from './content/teaching-4x4.js';
+        // ── P3: full solver offload to Web Worker ──────────────────────────
+        // The main thread no longer imports ReductionSolver or builds any BFS
+        // table. The solver-worker owns the entire preload + solve pipeline,
+        // so the 3D scene and camera scan UI become interactive within ~1 s
+        // of page load while the worker spends 5-15 s building lookup tables
+        // in parallel.
+        //
+        // We do import perms-n on the main thread because the bench panel (and
+        // any future scramble generator) applies moves without a postMessage
+        // round-trip; the perm tables themselves are ~100 KB.
+        import { buildPerms } from './core/geometry/perms-n.js';
 
-        // ── Loading overlay ────────────────────────────────────────────────
-        // Updates the fixed-position overlay rendered at <body> entry. Two
-        // phases are visible to the user:
-        //   1. Centers BFS table build (main thread, ~3 s desktop / ~10 s mobile).
-        //      Spinner CANNOT animate during this — main thread is busy. We set
-        //      the static text and progress bar BEFORE preload() starts so the
-        //      user at least sees what stage we're in.
-        //   2. Worker cubejs/cstimer init (worker thread, ~4 s desktop / ~10 s mobile).
-        //      Main thread is free — spinner animates, progress updates live.
-        // Hides the overlay 350 ms after percent=100 so the fade-out reads.
         function setLoadingProgress(percent, detail) {
             const fill = document.getElementById('loading-bar-fill');
             const det  = document.getElementById('loading-detail');
@@ -2094,66 +2087,73 @@
         }
         window.setLoadingProgress = setLoadingProgress;
 
-        // ── cstimer Worker proxy ────────────────────────────────────────────
-        // Offloads the synchronous cstimer.genFacelet IDA* search onto a Web
-        // Worker so the main thread stays responsive (3D animation, UI clicks)
-        // during 30 ms – 3 s solves. Each rotation attempt becomes one postMessage
-        // round-trip; the message-payload overhead (~ms-level for 96-char state +
-        // short solution string) is negligible vs. the cstimer work itself.
-        //
-        // Falls back to the main-thread globalThis.scramble_444 if the worker
-        // fails to load (e.g. opened via file:// without a static server, or
-        // an importScripts 404 / CSP block after spawn — see onFatal below).
-        function createCstimerWorkerProxy(onFatal) {
+        function createSolverWorkerProxy(onFatal, onProgress) {
             let worker;
             try {
-                worker = new Worker('workers/cstimer-worker.js');
+                worker = new Worker('workers/solver-worker.js', { type: 'module' });
             } catch (err) {
-                console.warn('[cstimer-worker] failed to spawn, falling back to main thread:', err);
+                console.warn('[solver-worker] failed to spawn:', err);
                 return null;
             }
             const pending = new Map();
             let nextId = 0;
             let dead = false;
+            // Module workers run their top-level await before they can receive
+            // postMessages. We don't want callers postMessaging into a worker
+            // that hasn't finished bootstrapping (vendor load + ES module
+            // resolution), so we gate all sends on this 'boot-ready' beacon.
+            // bootReject lets markDead unblock send()s that were waiting for
+            // boot when the worker crashes before ever posting boot-ready.
+            let bootResolve, bootReject;
+            const bootPromise = new Promise((res, rej) => { bootResolve = res; bootReject = rej; });
+            // Track the most recent in-flight solve so its onStatus/onProgress
+            // callbacks can receive the worker's broadcast progress messages.
+            // Only one solve runs at a time in our usage; if that ever changes,
+            // promote this to a Map keyed by message id.
+            let activeSolveCallbacks = null;
             function markDead(error) {
                 if (dead) return;
                 dead = true;
+                bootReject(error);  // unblock any send() awaiting boot
                 for (const slot of pending.values()) slot.reject(error);
                 pending.clear();
                 try { worker.terminate(); } catch {}
                 if (typeof onFatal === 'function') onFatal(error);
             }
             worker.onmessage = (e) => {
-                const { id, type, result, error, step, percent } = e.data || {};
-                // Progress messages are broadcast (no id) — relay them to the
-                // loading overlay before checking the pending map. Keep going
-                // so an init message that also has an id resolves correctly.
+                const data = e.data || {};
+                const { id, type } = data;
+                if (type === 'boot-ready') { bootResolve(); return; }
                 if (type === 'init-progress') {
-                    const label = step === 'cubejs'  ? '初始化 Kociemba 表（約 5-15s）'
-                              : step === 'cstimer' ? '初始化 cstimer 表（約 1-3s）'
-                              : step === 'done'    ? '解題引擎就緒'
-                              :                       `初始化中（${step}）`;
-                    // Map worker-side 30/70/100 percent into 50-100 range on the
-                    // overall bar (the first 0-50% covers main-thread BFS build).
-                    const overallPct = 50 + Math.round(percent * 0.5);
-                    window.setLoadingProgress?.(overallPct, label);
+                    if (typeof onProgress === 'function') onProgress(type, data);
+                    return;
+                }
+                if (type === 'solve-progress') {
+                    // Route to whichever solve is currently pending (only one).
+                    const cb = activeSolveCallbacks;
+                    if (cb) {
+                        if (data.phase === 'phase-start' && typeof cb.onStatus === 'function') {
+                            cb.onStatus('phase-start', { name: data.name });
+                        } else if (data.phase === 'rotation' && typeof cb.onProgress === 'function') {
+                            cb.onProgress(data);
+                        }
+                    }
+                    if (typeof onProgress === 'function') onProgress(type, data);
                     return;
                 }
                 const slot = pending.get(id);
                 if (!slot) return;
                 pending.delete(id);
-                if (type === 'error')          slot.reject(new Error(error || 'cstimer-worker error'));
-                else if (type === 'init-done') slot.resolve();
-                else if (type === 'result')    slot.resolve(result || '');
-                else                            slot.reject(new Error(`cstimer-worker: unexpected response type "${type}"`));
+                if (type === 'error')           slot.reject(new Error(data.error || 'solver-worker error'));
+                else if (type === 'init-done')  slot.resolve();
+                else if (type === 'result')     slot.resolve(data);
+                else                             slot.reject(new Error(`solver-worker: unexpected response type "${type}"`));
             };
-            // Worker script load failure (404, importScripts error, CSP block, etc.)
-            // surfaces here. We mark the proxy dead so the host can swap back to
-            // the main-thread cstimer; otherwise solve() would hang forever.
-            worker.onerror = (e) => markDead(new Error(`cstimer-worker crashed: ${e.message || e.type || 'unknown error'}`));
-            worker.onmessageerror = () => markDead(new Error('cstimer-worker: postMessage deserialization failed'));
-            function send(type, payload) {
-                if (dead) return Promise.reject(new Error('cstimer-worker is dead'));
+            worker.onerror = (e) => markDead(new Error(`solver-worker crashed: ${e.message || e.type || 'unknown error'}`));
+            worker.onmessageerror = () => markDead(new Error('solver-worker: postMessage deserialization failed'));
+            async function send(type, payload) {
+                if (dead) throw new Error('solver-worker is dead');
+                await bootPromise;
                 const id = `m${++nextId}`;
                 return new Promise((resolve, reject) => {
                     pending.set(id, { resolve, reject });
@@ -2161,15 +2161,34 @@
                 });
             }
             return {
-                init:       ()       => send('init', {}),
-                genFacelet: (state)  => send('genFacelet', { state }),
-                _worker:    worker, // exposed for diagnostics; not part of the public proxy contract
+                preload: () => send('init', {}),
+                solve:   async (state, options = {}) => {
+                    // Stash per-solve callbacks so worker's broadcast
+                    // solve-progress messages can reach them. Cleared in
+                    // the finally so a follow-up solve gets a fresh slot.
+                    activeSolveCallbacks = {
+                        onStatus:   options.onStatus,
+                        onProgress: options.onProgress,
+                    };
+                    try {
+                        const r = await send('solve', { state });
+                        return {
+                            phases:     r.phases,
+                            totalMoves: r.totalMoves,
+                            telemetry:  r.telemetry,
+                            solverName: 'reduction-4x4',
+                        };
+                    } finally {
+                        activeSolveCallbacks = null;
+                    }
+                },
+                // Main-thread perm tables for scramble generation in the bench
+                // panel. Cheap to build (~5 ms). The worker has its own copy.
+                perms:   buildPerms(4),
+                _worker: worker,
             };
         }
 
-        // Lazy-loader for the main-thread cstimer-444 vendor script. Only fires
-        // when the worker dies (or never spawned). Avoids the 3 MB / 5–10s mobile
-        // parse cost of loading cstimer-444.js synchronously on page entry.
         function loadMainThreadCstimer() {
             if (typeof self.scramble_444 !== 'undefined') return Promise.resolve(self.scramble_444);
             return new Promise((resolve, reject) => {
@@ -2182,78 +2201,73 @@
                 document.head.appendChild(s);
             });
         }
+        async function loadLocalSolverFallback() {
+            const [reductionMod, teachingMod] = await Promise.all([
+                import('./core/solver/reduction.js'),
+                import('./content/teaching-4x4.js'),
+            ]);
+            await loadMainThreadCstimer();
+            const local = new reductionMod.ReductionSolver({ N: 4, teaching: teachingMod.TEACHING_4X4 });
+            await local.preload();
+            return local;
+        }
 
-        const solver = new ReductionSolver({ N: 4, teaching: TEACHING_4X4 });
-        // onFatal: invoked when the worker dies after spawn (importScripts 404, etc.).
-        // We detach the broken proxy, lazy-load the main-thread cstimer-444 vendor,
-        // invalidate the preload-promise cache so the next solve re-runs preload
-        // against the now-loaded main-thread cstimer, and republish window.__reduction.ready
-        // (the old one is already rejected).
-        const cstimerProxy = createCstimerWorkerProxy((err) => {
-            console.warn('[cstimer-worker] fatal, loading main-thread fallback:', err);
-            setLoadingProgress(15, 'Worker 失效，改用主 thread cstimer…');
-            // Synchronously detach the dead worker proxy and republish ready
-            // BEFORE awaiting any async work. The original ready.catch fires as
-            // a microtask of markDead's rejection, and it checks
-            // `window.__reduction.ready === ready` to decide whether to hide the
-            // overlay; we must have swapped that field by then or the overlay
-            // gets hidden prematurely while fallback work is still running.
-            solver.cstimerCaller = null;
-            solver._preloadPromise = null;
-            window.__reduction.viaWorker = false;
-            const fallbackReady = (async () => {
-                await loadMainThreadCstimer();
-                setLoadingProgress(40, '重新初始化 cstimer / cubejs（main thread）');
-                await solver.preload();
-                setLoadingProgress(100, '就緒（main-thread fallback）');
-                return solver;
-            })();
-            fallbackReady.catch((e) => {
-                console.error('[cstimer] worker AND main-thread fallback failed:', e);
-                setLoadingProgress(100, `初始化失敗：${e.message || e}`);
-            });
-            window.__reduction.ready = fallbackReady;
-        });
-        // When the worker is alive, preload runs only the centers BFS + worker init
-        // (cstimerCaller is the worker proxy). When the worker failed to spawn,
-        // we must lazy-load the main-thread cstimer FIRST and only then run preload,
-        // otherwise ready resolves before scramble_444 exists and solve() would
-        // return empty edges/parity/3×3 stubs.
+        const solverProxy = createSolverWorkerProxy(
+            // onFatal — worker died after spawn (CSP, fetch failure, etc.).
+            // Publish a fresh ready promise SYNCHRONOUSLY before awaiting any
+            // async work, so callers that observe window.__reduction.ready
+            // during the fallback window attach to the recovery chain instead
+            // of the already-rejected original promise. Same pattern as the
+            // previous cstimer-worker proxy used (see commit 19a02bf).
+            (err) => {
+                console.warn('[solver-worker] fatal, falling back to main thread:', err);
+                setLoadingProgress(15, 'Worker 失效,改用主 thread solver…');
+                window.__reduction.viaWorker = false;
+                const fallbackReady = (async () => {
+                    const local = await loadLocalSolverFallback();
+                    window.__reduction.solver = local;
+                    setLoadingProgress(100, '就緒(main-thread fallback)');
+                    return local;
+                })();
+                fallbackReady.catch((e) => {
+                    console.error('[solver-worker] worker AND main-thread fallback failed:', e);
+                    setLoadingProgress(100, `初始化失敗:${e.message || e}`);
+                });
+                window.__reduction.ready = fallbackReady;
+            },
+            // onProgress — relay worker progress messages to the loading overlay.
+            (type, payload) => {
+                if (type === 'init-progress') {
+                    const label = payload.step === 'centers' ? '建立中心查找表(worker,約 3-10s)'
+                              : payload.step === 'done'     ? '解題引擎就緒'
+                              :                                `初始化中(${payload.step})`;
+                    setLoadingProgress(payload.percent, label);
+                }
+            }
+        );
+
         let ready;
-        if (cstimerProxy) {
-            solver.cstimerCaller = cstimerProxy;
-            console.log('[cstimer] running in Web Worker (main-thread vendor lazy)');
-            // Show main-thread BFS stage in the overlay before preload starts.
-            // The spinner will freeze during BFS build (main thread busy), but
-            // at least the user sees the right text and the bar at ~10%.
-            setLoadingProgress(10, '建立中心查找表（main thread，約 3-10s）');
-            ready = solver.preload().then(() => {
-                setLoadingProgress(100, '就緒');
-                return solver;
-            });
+        if (solverProxy) {
+            console.log('[solver] running entirely in Web Worker (main thread free)');
+            setLoadingProgress(5, '啟動 solver worker…');
+            ready = solverProxy.preload().then(() => solverProxy);
         } else {
-            console.log('[cstimer] worker spawn failed, loading main-thread vendor');
+            console.log('[solver] worker spawn failed, loading on main thread');
             setLoadingProgress(15, '載入解題引擎…');
-            ready = loadMainThreadCstimer().then(() => {
-                setLoadingProgress(40, '建立中心查找表 + 初始化 cstimer/cubejs');
-                return solver.preload();
-            }).then(() => {
+            ready = loadLocalSolverFallback().then(local => {
+                window.__reduction.solver = local;
+                window.__reduction.viaWorker = false;
                 setLoadingProgress(100, '就緒');
-                return solver;
+                return local;
             });
         }
-        // Only mark the overlay as terminal-failed if onFatal hasn't republished
-        // a fresh ready promise. When the worker dies mid-init, onFatal swaps
-        // window.__reduction.ready with the fallback chain — that chain owns
-        // its own overlay updates, so this handler must NOT race ahead and
-        // hide the overlay prematurely.
         ready.catch((err) => {
             console.error('[ready] preload failed:', err);
             if (window.__reduction.ready === ready) {
-                setLoadingProgress(100, `初始化失敗：${err.message || err}`);
+                setLoadingProgress(100, `初始化失敗:${err.message || err}`);
             }
         });
-        window.__reduction = { solver, ready, viaWorker: !!cstimerProxy };
+        window.__reduction = { solver: solverProxy, ready, viaWorker: !!solverProxy };
     </script>
 
     <script>
