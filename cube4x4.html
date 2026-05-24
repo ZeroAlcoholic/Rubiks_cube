@@ -30,6 +30,17 @@
             background:
                 radial-gradient(circle at 50% 42%, rgba(14, 78, 52, 0.48), rgba(3, 21, 15, 0.78) 45%, #020806 82%),
                 linear-gradient(145deg, #03110d 0%, #071f17 48%, #010403 100%);
+            /* Intentionally NO transition on height — the renderer.setSize call
+               from onWindowResize() reads clientHeight synchronously, and a CSS
+               transition would mean we read the old/intermediate value, leaving
+               the Three.js canvas stuck at the wrong size. Instant snap is fine
+               here; the solve-guide itself slides in with its own animation. */
+        }
+        /* When the solve guide is visible, shrink the canvas so the 3D cube
+           doesn't render under the bottom panel. --guide-h is set by JS to
+           the live measured panel height + a small margin. */
+        body.guide-visible #canvas-container {
+            height: calc(100vh - var(--guide-h, 180px));
         }
         .ui-layer { position: absolute; z-index: 10; pointer-events: none; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; padding: 20px; box-sizing: border-box; }
         .text-3xl { font-size: 1.875rem; line-height: 2.25rem; }
@@ -186,15 +197,19 @@
         .guide-progress { flex: 1; color: #d1fae5; font-size: 0.95rem; }
         .guide-teaching {
             font-size: 0.78rem;
-            line-height: 1.55;
+            line-height: 1.4;
             color: rgba(209, 250, 229, 0.78);
-            padding: 7px 10px;
-            margin: 4px 0 10px;
+            padding: 4px 10px;
+            margin: 2px 0 8px;
             background: rgba(134, 239, 172, 0.06);
             border-left: 2px solid rgba(134, 239, 172, 0.35);
             border-radius: 4px;
-            max-height: 90px;
-            overflow-y: auto;
+            /* Force a single line; chinese text doesn't ellipsize prettily,
+               so the source strings in content/teaching-4x4.js are kept short
+               enough (≤22 chars) to fit even on a 320px-wide phone. */
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         .guide-teaching:empty { display: none; }
         .guide-controls { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
@@ -203,6 +218,21 @@
         .guide-speed-btn { font-size: 0.75rem !important; padding: 3px 11px !important; opacity: 0.45; transition: opacity 0.15s; }
         .guide-speed-btn.active { opacity: 1; border-color: rgba(134,239,172,0.55) !important; color: #86efac !important; }
         .guide-close-btn { margin-left: auto; font-size: 0.78rem; opacity: 0.55; }
+
+        /* Mobile / short-viewport compaction — keep the solve-guide from
+           covering the bottom quarter of the 3D cube. Triggered both by
+           narrow widths AND short heights so landscape phones also benefit. */
+        @media (max-width: 640px), (max-height: 720px) {
+            .solve-guide { padding: 8px 10px; bottom: 8px; }
+            .guide-main { margin-bottom: 4px; gap: 8px; }
+            .notation-badge { font-size: 1.4rem; min-width: 52px; }
+            .guide-progress { font-size: 0.78rem; }
+            .guide-teaching { font-size: 0.72rem; padding: 3px 8px; margin: 1px 0 6px; }
+            .guide-controls { gap: 5px; }
+            .guide-controls .btn { padding: 5px 10px; font-size: 0.85rem; }
+            .guide-footer { margin-top: 4px; gap: 4px; }
+            .guide-speed-btn { padding: 2px 8px !important; font-size: 0.7rem !important; }
+        }
 
         /* Loading overlay — shown until ReductionSolver is ready.
            Honest design: the spinner cannot animate while the Centers BFS
@@ -2994,6 +3024,11 @@
                 document.getElementById('scanner-panel').classList.add('hidden');
                 this.pauseGuideAutoPlay();
                 document.getElementById('solve-guide').classList.add('hidden');
+                // Hiding the guide here must also drop the body class that
+                // shrinks the canvas; otherwise the cube stays at the smaller
+                // size until the user explicitly closes the guide again.
+                document.body.classList.remove('guide-visible');
+                if (this.renderer) this.onWindowResize();
                 if (this.scannerAnimation) {
                     cancelAnimationFrame(this.scannerAnimation);
                     this.scannerAnimation = null;
@@ -3134,6 +3169,10 @@
                 document.getElementById('state-editor').classList.add('hidden');
                 this.pauseGuideAutoPlay();
                 document.getElementById('solve-guide').classList.add('hidden');
+                // Same cleanup as closeSolveGuide() — keep --guide-h reserved
+                // canvas height in sync with guide visibility.
+                document.body.classList.remove('guide-visible');
+                if (this.renderer) this.onWindowResize();
                 const panel = document.getElementById('scanner-panel');
                 const status = document.getElementById('scanner-status');
                 panel.classList.remove('hidden');
@@ -7339,13 +7378,24 @@
                 this.executedGuideMoves = [];
                 this.isGuideAutoPlaying = false;
                 this.guideTeaching = teachingByPhase || {};
-                document.getElementById('solve-guide').classList.remove('hidden');
+                const guideEl = document.getElementById('solve-guide');
+                guideEl.classList.remove('hidden');
                 this.updateSolveGuide();
+                // Reserve panel space on the 3D canvas so the cube doesn't render
+                // underneath the bottom guide. Measure AFTER unhide + updateSolveGuide
+                // so the rect reflects actual content (teaching text, button widths).
+                // The +16 is breathing room between cube bottom and panel top.
+                const guideH = guideEl.getBoundingClientRect().height + 16;
+                document.documentElement.style.setProperty('--guide-h', `${Math.round(guideH)}px`);
+                document.body.classList.add('guide-visible');
+                this.onWindowResize();
             }
 
             closeSolveGuide() {
                 this.pauseGuideAutoPlay();
                 document.getElementById('solve-guide').classList.add('hidden');
+                document.body.classList.remove('guide-visible');
+                this.onWindowResize();
             }
 
             updateSolveGuide() {
@@ -8872,9 +8922,25 @@
             }
 
             onWindowResize() {
-                this.camera.aspect = window.innerWidth / window.innerHeight;
+                // If the solve guide is visible, re-measure its height first.
+                // The --guide-h CSS variable was set once in startSolveGuide(),
+                // but viewport rotation / resize can change the panel's content
+                // wrap (e.g. media query thresholds), so we must refresh it
+                // before reading the container's clientHeight.
+                const guideEl = document.getElementById('solve-guide');
+                if (guideEl && !guideEl.classList.contains('hidden')) {
+                    const guideH = guideEl.getBoundingClientRect().height + 16;
+                    document.documentElement.style.setProperty('--guide-h', `${Math.round(guideH)}px`);
+                }
+                // Use the canvas-container's actual size, not window.innerWidth/Height,
+                // so the solve-guide-visible CSS class (which shrinks the container) gets
+                // honored. Falls back to window dims if container missing (test mode).
+                const container = document.getElementById('canvas-container');
+                const W = container?.clientWidth  || window.innerWidth;
+                const H = container?.clientHeight || window.innerHeight;
+                this.camera.aspect = W / H;
                 this.camera.updateProjectionMatrix();
-                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.setSize(W, H);
                 this._needsRender = true;
             }
         }
