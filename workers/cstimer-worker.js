@@ -43,14 +43,18 @@ self.onmessage = (e) => {
     try {
         if (type === 'init') {
             if (!initialized) {
-                // cubejs lookup tables (~12M entries) — multi-second on first call.
+                // Both inits are synchronous in the worker thread — we can only
+                // emit phase markers (start/done), not fine-grained %. The host
+                // uses these to update the loading overlay text.
+                self.postMessage({ type: 'init-progress', step: 'cubejs', percent: 30 });
                 if (typeof Cube !== 'undefined' && typeof Cube.initSolver === 'function') {
-                    Cube.initSolver();
+                    Cube.initSolver();  // cubejs ~12M Kociemba pruning tables
                 }
-                // cstimer 4×4 internal pruning tables.
+                self.postMessage({ type: 'init-progress', step: 'cstimer', percent: 70 });
                 if (typeof scramble_444 !== 'undefined' && typeof scramble_444.init === 'function') {
-                    scramble_444.init();
+                    scramble_444.init();  // cstimer 4×4 internal pruning tables
                 }
+                self.postMessage({ type: 'init-progress', step: 'done', percent: 100 });
                 initialized = true;
             }
             self.postMessage({ id, type: 'init-done' });

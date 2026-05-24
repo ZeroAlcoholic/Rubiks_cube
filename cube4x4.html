@@ -204,6 +204,43 @@
         .guide-speed-btn.active { opacity: 1; border-color: rgba(134,239,172,0.55) !important; color: #86efac !important; }
         .guide-close-btn { margin-left: auto; font-size: 0.78rem; opacity: 0.55; }
 
+        /* Loading overlay — shown until ReductionSolver is ready.
+           Honest design: the spinner cannot animate while the Centers BFS
+           build blocks the main thread (~10s on mobile); we keep it visible
+           anyway so the user knows the app is still loading, not crashed.
+           Once the page enters animation-capable state (worker init phase),
+           the spinner picks back up. */
+        .loading-overlay {
+            position: fixed; inset: 0; z-index: 100;
+            background: linear-gradient(135deg, rgba(8,14,12,0.97), rgba(4,8,6,0.97));
+            display: flex; align-items: center; justify-content: center;
+            backdrop-filter: blur(4px);
+            transition: opacity 0.35s ease;
+        }
+        .loading-overlay.hidden { opacity: 0; pointer-events: none; }
+        .loading-card {
+            display: flex; flex-direction: column; align-items: center;
+            gap: 14px; padding: 28px 36px;
+            background: rgba(20, 32, 26, 0.6);
+            border: 1px solid rgba(134,239,172,0.22);
+            border-radius: 12px;
+            box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+            max-width: 320px; text-align: center;
+        }
+        .loading-spinner {
+            width: 38px; height: 38px;
+            border: 3px solid rgba(134,239,172,0.15);
+            border-top-color: #86efac;
+            border-radius: 50%;
+            animation: loading-spin 0.9s linear infinite;
+        }
+        @keyframes loading-spin { to { transform: rotate(360deg); } }
+        .loading-title { color: #86efac; font-size: 1rem; font-weight: 600; letter-spacing: 1px; }
+        .loading-detail { color: rgba(209,250,229,0.78); font-size: 0.82rem; line-height: 1.5; min-height: 1.2em; }
+        .loading-bar { width: 220px; height: 5px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden; }
+        .loading-bar-fill { height: 100%; width: 5%; background: linear-gradient(90deg, #86efac, #4ade80); border-radius: 3px; transition: width 0.4s ease; }
+        .loading-hint { color: rgba(255,255,255,0.4); font-size: 0.72rem; margin-top: 4px; }
+
         /* Solver Bench panel (dev mode: ?bench=1) */
         .bench-panel {
             position: fixed; top: 16px; right: 16px; z-index: 60;
@@ -713,6 +750,19 @@
     </style>
 </head>
 <body>
+
+    <!-- Loading overlay — visible from page-paint until ReductionSolver.ready resolves.
+         Placed first in <body> so the browser paints it before module scripts run
+         and start their multi-second preload work. Hidden via setLoadingProgress(100). -->
+    <div id="loading-overlay" class="loading-overlay">
+        <div class="loading-card">
+            <div class="loading-spinner"></div>
+            <div class="loading-title">初始化解題引擎</div>
+            <div id="loading-detail" class="loading-detail">載入模組…</div>
+            <div class="loading-bar"><div id="loading-bar-fill" class="loading-bar-fill"></div></div>
+            <div class="loading-hint">首次載入約 8-20 秒（手機較久），之後快取會加速</div>
+        </div>
+    </div>
 
     <div class="ui-layer">
         <div class="top-bar">
@@ -1994,6 +2044,26 @@
         import { ReductionSolver } from './core/solver/reduction.js';
         import { TEACHING_4X4 } from './content/teaching-4x4.js';
 
+        // ── Loading overlay ────────────────────────────────────────────────
+        // Updates the fixed-position overlay rendered at <body> entry. Two
+        // phases are visible to the user:
+        //   1. Centers BFS table build (main thread, ~3 s desktop / ~10 s mobile).
+        //      Spinner CANNOT animate during this — main thread is busy. We set
+        //      the static text and progress bar BEFORE preload() starts so the
+        //      user at least sees what stage we're in.
+        //   2. Worker cubejs/cstimer init (worker thread, ~4 s desktop / ~10 s mobile).
+        //      Main thread is free — spinner animates, progress updates live.
+        // Hides the overlay 350 ms after percent=100 so the fade-out reads.
+        function setLoadingProgress(percent, detail) {
+            const fill = document.getElementById('loading-bar-fill');
+            const det  = document.getElementById('loading-detail');
+            const ovl  = document.getElementById('loading-overlay');
+            if (fill && typeof percent === 'number') fill.style.width = Math.max(5, Math.min(100, percent)) + '%';
+            if (det && detail) det.textContent = detail;
+            if (ovl && percent >= 100) setTimeout(() => ovl.classList.add('hidden'), 350);
+        }
+        window.setLoadingProgress = setLoadingProgress;
+
         // ── cstimer Worker proxy ────────────────────────────────────────────
         // Offloads the synchronous cstimer.genFacelet IDA* search onto a Web
         // Worker so the main thread stays responsive (3D animation, UI clicks)
@@ -2024,7 +2094,21 @@
                 if (typeof onFatal === 'function') onFatal(error);
             }
             worker.onmessage = (e) => {
-                const { id, type, result, error } = e.data || {};
+                const { id, type, result, error, step, percent } = e.data || {};
+                // Progress messages are broadcast (no id) — relay them to the
+                // loading overlay before checking the pending map. Keep going
+                // so an init message that also has an id resolves correctly.
+                if (type === 'init-progress') {
+                    const label = step === 'cubejs'  ? '初始化 Kociemba 表（約 5-15s）'
+                              : step === 'cstimer' ? '初始化 cstimer 表（約 1-3s）'
+                              : step === 'done'    ? '解題引擎就緒'
+                              :                       `初始化中（${step}）`;
+                    // Map worker-side 30/70/100 percent into 50-100 range on the
+                    // overall bar (the first 0-50% covers main-thread BFS build).
+                    const overallPct = 50 + Math.round(percent * 0.5);
+                    window.setLoadingProgress?.(overallPct, label);
+                    return;
+                }
                 const slot = pending.get(id);
                 if (!slot) return;
                 pending.delete(id);
@@ -2075,20 +2159,30 @@
         // invalidate the preload-promise cache so the next solve re-runs preload
         // against the now-loaded main-thread cstimer, and republish window.__reduction.ready
         // (the old one is already rejected).
-        const cstimerProxy = createCstimerWorkerProxy(async (err) => {
+        const cstimerProxy = createCstimerWorkerProxy((err) => {
             console.warn('[cstimer-worker] fatal, loading main-thread fallback:', err);
-            try {
+            setLoadingProgress(15, 'Worker 失效，改用主 thread cstimer…');
+            // Synchronously detach the dead worker proxy and republish ready
+            // BEFORE awaiting any async work. The original ready.catch fires as
+            // a microtask of markDead's rejection, and it checks
+            // `window.__reduction.ready === ready` to decide whether to hide the
+            // overlay; we must have swapped that field by then or the overlay
+            // gets hidden prematurely while fallback work is still running.
+            solver.cstimerCaller = null;
+            solver._preloadPromise = null;
+            window.__reduction.viaWorker = false;
+            const fallbackReady = (async () => {
                 await loadMainThreadCstimer();
-                solver.cstimerCaller = null;
-                solver._preloadPromise = null;
-                window.__reduction.viaWorker = false;
-                window.__reduction.ready = solver.preload().then(() => solver);
-            } catch (loadErr) {
-                // Both worker and main-thread fallback failed. Next solve() will throw.
-                console.error('[cstimer] worker AND main-thread fallback failed:', loadErr);
-                window.__reduction.viaWorker = false;
-                window.__reduction.ready = Promise.reject(loadErr);
-            }
+                setLoadingProgress(40, '重新初始化 cstimer / cubejs（main thread）');
+                await solver.preload();
+                setLoadingProgress(100, '就緒（main-thread fallback）');
+                return solver;
+            })();
+            fallbackReady.catch((e) => {
+                console.error('[cstimer] worker AND main-thread fallback failed:', e);
+                setLoadingProgress(100, `初始化失敗：${e.message || e}`);
+            });
+            window.__reduction.ready = fallbackReady;
         });
         // When the worker is alive, preload runs only the centers BFS + worker init
         // (cstimerCaller is the worker proxy). When the worker failed to spawn,
@@ -2099,12 +2193,36 @@
         if (cstimerProxy) {
             solver.cstimerCaller = cstimerProxy;
             console.log('[cstimer] running in Web Worker (main-thread vendor lazy)');
-            ready = solver.preload().then(() => solver);
+            // Show main-thread BFS stage in the overlay before preload starts.
+            // The spinner will freeze during BFS build (main thread busy), but
+            // at least the user sees the right text and the bar at ~10%.
+            setLoadingProgress(10, '建立中心查找表（main thread，約 3-10s）');
+            ready = solver.preload().then(() => {
+                setLoadingProgress(100, '就緒');
+                return solver;
+            });
         } else {
-            // Worker spawn failed at construction (rare; usually CSP or quota).
             console.log('[cstimer] worker spawn failed, loading main-thread vendor');
-            ready = loadMainThreadCstimer().then(() => solver.preload()).then(() => solver);
+            setLoadingProgress(15, '載入解題引擎…');
+            ready = loadMainThreadCstimer().then(() => {
+                setLoadingProgress(40, '建立中心查找表 + 初始化 cstimer/cubejs');
+                return solver.preload();
+            }).then(() => {
+                setLoadingProgress(100, '就緒');
+                return solver;
+            });
         }
+        // Only mark the overlay as terminal-failed if onFatal hasn't republished
+        // a fresh ready promise. When the worker dies mid-init, onFatal swaps
+        // window.__reduction.ready with the fallback chain — that chain owns
+        // its own overlay updates, so this handler must NOT race ahead and
+        // hide the overlay prematurely.
+        ready.catch((err) => {
+            console.error('[ready] preload failed:', err);
+            if (window.__reduction.ready === ready) {
+                setLoadingProgress(100, `初始化失敗：${err.message || err}`);
+            }
+        });
         window.__reduction = { solver, ready, viaWorker: !!cstimerProxy };
     </script>
 
