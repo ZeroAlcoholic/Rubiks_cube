@@ -2091,71 +2091,76 @@
         // (core/solver/reduction.js, content/teaching-4x4.js) materially change.
         // The query param defeats the worker module cache so the new code takes
         // effect on next page load without a manual hard-reload.
-        const WORKER_VERSION = 3;
+        const WORKER_VERSION = 4;
         function createSolverWorkerProxy(onFatal, onProgress) {
-            let worker;
-            try {
-                worker = new Worker(`workers/solver-worker.js?v=${WORKER_VERSION}`, { type: 'module' });
-            } catch (err) {
-                console.warn('[solver-worker] failed to spawn:', err);
-                return null;
-            }
+            // Mutable internal state — `cancelCurrent()` resets the worker and
+            // resets these closures so a fresh worker spawns and the proxy
+            // continues to work transparently to callers.
+            let worker = null;
             const pending = new Map();
             let nextId = 0;
             let dead = false;
-            // Module workers run their top-level await before they can receive
-            // postMessages. We don't want callers postMessaging into a worker
-            // that hasn't finished bootstrapping (vendor load + ES module
-            // resolution), so we gate all sends on this 'boot-ready' beacon.
-            // bootReject lets markDead unblock send()s that were waiting for
-            // boot when the worker crashes before ever posting boot-ready.
-            let bootResolve, bootReject;
-            const bootPromise = new Promise((res, rej) => { bootResolve = res; bootReject = rej; });
-            // Track the most recent in-flight solve so its onStatus/onProgress
-            // callbacks can receive the worker's broadcast progress messages.
-            // Only one solve runs at a time in our usage; if that ever changes,
-            // promote this to a Map keyed by message id.
+            let bootResolve, bootReject, bootPromise;
             let activeSolveCallbacks = null;
+            // `preloadKickoff` is the chained preload-on-spawn promise. Callers
+            // observe it via proxy.preload(); we re-create it on each spawn so
+            // post-cancel callers get a fresh "is-ready-after-respawn" promise.
+            let preloadKickoff = null;
+
             function markDead(error) {
                 if (dead) return;
                 dead = true;
-                bootReject(error);  // unblock any send() awaiting boot
+                if (bootReject) bootReject(error);
                 for (const slot of pending.values()) slot.reject(error);
                 pending.clear();
-                try { worker.terminate(); } catch {}
+                try { worker?.terminate(); } catch {}
                 if (typeof onFatal === 'function') onFatal(error);
             }
-            worker.onmessage = (e) => {
-                const data = e.data || {};
-                const { id, type } = data;
-                if (type === 'boot-ready') { bootResolve(); return; }
-                if (type === 'init-progress') {
-                    if (typeof onProgress === 'function') onProgress(type, data);
-                    return;
-                }
-                if (type === 'solve-progress') {
-                    // Route to whichever solve is currently pending (only one).
-                    const cb = activeSolveCallbacks;
-                    if (cb) {
-                        if (data.phase === 'phase-start' && typeof cb.onStatus === 'function') {
-                            cb.onStatus('phase-start', { name: data.name });
-                        } else if (data.phase === 'rotation' && typeof cb.onProgress === 'function') {
-                            cb.onProgress(data);
-                        }
+            function attachHandlers(w) {
+                w.onmessage = (e) => {
+                    const data = e.data || {};
+                    const { id, type } = data;
+                    if (type === 'boot-ready') { bootResolve(); return; }
+                    if (type === 'init-progress') {
+                        if (typeof onProgress === 'function') onProgress(type, data);
+                        return;
                     }
-                    if (typeof onProgress === 'function') onProgress(type, data);
-                    return;
-                }
-                const slot = pending.get(id);
-                if (!slot) return;
-                pending.delete(id);
-                if (type === 'error')           slot.reject(new Error(data.error || 'solver-worker error'));
-                else if (type === 'init-done')  slot.resolve();
-                else if (type === 'result')     slot.resolve(data);
-                else                             slot.reject(new Error(`solver-worker: unexpected response type "${type}"`));
-            };
-            worker.onerror = (e) => markDead(new Error(`solver-worker crashed: ${e.message || e.type || 'unknown error'}`));
-            worker.onmessageerror = () => markDead(new Error('solver-worker: postMessage deserialization failed'));
+                    if (type === 'solve-progress') {
+                        const cb = activeSolveCallbacks;
+                        if (cb) {
+                            if (data.phase === 'phase-start' && typeof cb.onStatus === 'function') {
+                                cb.onStatus('phase-start', { name: data.name });
+                            } else if (data.phase === 'rotation' && typeof cb.onProgress === 'function') {
+                                cb.onProgress(data);
+                            }
+                        }
+                        if (typeof onProgress === 'function') onProgress(type, data);
+                        return;
+                    }
+                    const slot = pending.get(id);
+                    if (!slot) return;
+                    pending.delete(id);
+                    if (type === 'error')           slot.reject(new Error(data.error || 'solver-worker error'));
+                    else if (type === 'init-done')  slot.resolve();
+                    else if (type === 'result')     slot.resolve(data);
+                    else                             slot.reject(new Error(`solver-worker: unexpected response type "${type}"`));
+                };
+                w.onerror = (e) => markDead(new Error(`solver-worker crashed: ${e.message || e.type || 'unknown error'}`));
+                w.onmessageerror = () => markDead(new Error('solver-worker: postMessage deserialization failed'));
+            }
+            // Construct a fresh worker + reset bootPromise. Called by initial
+            // spawn AND by cancelCurrent() to recover after termination.
+            function spawnWorker() {
+                bootPromise = new Promise((res, rej) => { bootResolve = res; bootReject = rej; });
+                worker = new Worker(`workers/solver-worker.js?v=${WORKER_VERSION}`, { type: 'module' });
+                attachHandlers(worker);
+            }
+            try { spawnWorker(); }
+            catch (err) {
+                console.warn('[solver-worker] failed to spawn:', err);
+                return null;
+            }
+
             async function send(type, payload) {
                 if (dead) throw new Error('solver-worker is dead');
                 await bootPromise;
@@ -2166,11 +2171,14 @@
                 });
             }
             return {
-                preload: () => send('init', {}),
-                solve:   async (state, options = {}) => {
-                    // Stash per-solve callbacks so worker's broadcast
-                    // solve-progress messages can reach them. Cleared in
-                    // the finally so a follow-up solve gets a fresh slot.
+                preload: () => {
+                    // Cache the kickoff so callers calling preload() multiple
+                    // times (e.g., after cancel + retry) get the same in-flight
+                    // promise. Re-created in cancelCurrent().
+                    if (!preloadKickoff) preloadKickoff = send('init', {});
+                    return preloadKickoff;
+                },
+                solve: async (state, options = {}) => {
                     activeSolveCallbacks = {
                         onStatus:   options.onStatus,
                         onProgress: options.onProgress,
@@ -2187,10 +2195,37 @@
                         activeSolveCallbacks = null;
                     }
                 },
-                // Main-thread perm tables for scramble generation in the bench
-                // panel. Cheap to build (~5 ms). The worker has its own copy.
+                // Abort any in-flight solve and respawn the worker. Existing
+                // pending solve() promises reject with 'cancelled by user'.
+                // The new worker hits IDB cache on its init, so respawn is
+                // ~1 s — much faster than the original cold start. Returns
+                // a promise that resolves when the fresh worker has finished
+                // its preload, so callers can await before issuing the next
+                // solve().
+                cancelCurrent: () => {
+                    const err = new Error('cancelled by user');
+                    // Reject the OLD bootPromise too: if a send() was awaiting
+                    // boot-ready (worker still bootstrapping when user cancelled),
+                    // it has no entry in `pending` yet, so the pending-rejection
+                    // loop below won't unblock it. spawnWorker() then replaces
+                    // bootPromise; the abandoned awaiter would hang forever.
+                    if (bootReject) bootReject(err);
+                    for (const slot of pending.values()) slot.reject(err);
+                    pending.clear();
+                    activeSolveCallbacks = null;
+                    try { worker?.terminate(); } catch {}
+                    // Reset state for the new worker
+                    preloadKickoff = null;
+                    spawnWorker();
+                    // Kick a fresh preload so caller awaiting cancelCurrent
+                    // knows when the new worker is solve-ready.
+                    preloadKickoff = send('init', {});
+                    return preloadKickoff;
+                },
                 perms:   buildPerms(4),
-                _worker: worker,
+                // Live worker handle for diagnostics. After cancelCurrent()
+                // this property reflects the NEW worker.
+                get _worker() { return worker; },
             };
         }
 
@@ -8034,18 +8069,45 @@
 
             async autoSolve(options = {}) {
                 const solveBtnText = document.getElementById('solve-text');
-                if (this.isAnimating || this.isSolving) return;
+                if (this.isAnimating) return;
+                // CANCEL path: re-clicking the solve button while the WORKER is
+                // computing a solution. `this.isSolving` alone is unsafe — it's
+                // also true during SolveGuide autoplay, which has no worker job
+                // to cancel. We use a dedicated `_solveInFlight` flag set only
+                // around the actual reducer.solve(state) call below.
+                if (this._solveInFlight) {
+                    const proxy = window.__reduction?.solver;
+                    if (proxy && typeof proxy.cancelCurrent === 'function') {
+                        console.log('[SOLVE] 使用者取消');
+                        // Republish ready against the new worker's preload, so
+                        // anyone awaiting window.__reduction.ready (e.g., a solve
+                        // attempt that races with cancel during initial preload)
+                        // observes the fresh worker instead of the rejected one.
+                        const respawnedReady = proxy.cancelCurrent().then(() => proxy);
+                        respawnedReady.catch((e) => console.warn('[SOLVE] respawn preload failed:', e));
+                        window.__reduction.ready = respawnedReady;
+                    }
+                    return;
+                }
+                if (this.isSolving) return;  // guide autoplay or other concurrent mode
 
                 const propagateErrors = !!options.propagateErrors;
                 this.isSolving = true;
-                solveBtnText.innerText = "讀取狀態...";
+                this._solveInFlight = true;
+                // Only advertise the cancel affordance when the solver actually
+                // exposes one (worker path). In the main-thread fallback the
+                // solve runs synchronously inside one tick — there's nothing to
+                // cancel, so showing "✕ 取消" would be a lie.
+                const canCancel = !!window.__reduction?.viaWorker
+                    && typeof window.__reduction.solver?.cancelCurrent === 'function';
+                solveBtnText.innerText = canCancel ? "✕ 取消" : "計算中…";
                 document.getElementById('win-msg').style.opacity = '0';
 
                 try {
                     console.log('[SOLVE] 當前狀態:', this.readCurrentState());
                     const solution = await this.buildSolutionForCurrentState(message => {
                         console.log('[SOLVE] 進度:', message);
-                        solveBtnText.innerText = message;
+                        solveBtnText.innerText = canCancel ? `✕ ${message}` : message;
                     });
                     console.log(`[SOLVE] 解法產生：${solution.moves.length} 步`,
                         solution.moves.slice(0, 20).map(m => m.notation || m).join(' ') + (solution.moves.length > 20 ? '...' : ''));
@@ -8059,16 +8121,29 @@
                     this.startSolveGuide(solution.moves, solution.teachingByPhase);
                     console.log('[SOLVE] 解題方案已載入，等待使用者按下開始');
                 } catch (error) {
-                    console.error('[SOLVE] 失敗:', error);
-                    solveBtnText.innerText = "解題失敗";
-                    if (propagateErrors) {
-                        // 重新拋出 — 讓 _finishScanAndSolve 的 _showHandoffError 處理
-                        throw error;
+                    // Distinguish user-initiated cancellation from real failures.
+                    // 'cancelled by user' originates in the proxy's cancelCurrent.
+                    const isCancel = error && /cancelled by user/i.test(error.message || '');
+                    if (isCancel) {
+                        console.log('[SOLVE] 已取消');
+                        solveBtnText.innerText = "已取消";
+                    } else {
+                        console.error('[SOLVE] 失敗:', error);
+                        solveBtnText.innerText = "解題失敗";
+                        if (propagateErrors) throw error;
+                        alert(`解題失敗：${error.message}\n\n（按 F12 開 console 看詳細訊息）`);
                     }
-                    alert(`解題失敗：${error.message}\n\n（按 F12 開 console 看詳細訊息）`);
                 } finally {
                     this.isSolving = false;
-                    if (solveBtnText.innerText !== '已完成') solveBtnText.innerText = '自動解題';
+                    this._solveInFlight = false;
+                    // Restore button text after a brief delay so the user sees
+                    // 已完成 / 已取消 / 解題失敗 before it resets.
+                    const finalText = solveBtnText.innerText;
+                    if (finalText !== '已完成') {
+                        setTimeout(() => {
+                            if (solveBtnText.innerText === finalText) solveBtnText.innerText = '自動解題';
+                        }, 1200);
+                    }
                 }
             }
 
