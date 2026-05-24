@@ -26,6 +26,7 @@ Solver implementation decisions (this work):
 - [ADR-8](./adr/ADR-8-cstimer-symmetry-workaround.md) — cstimer 48-element 對稱性 bug workaround
 - [ADR-9](./adr/ADR-9-rotation-priority-order.md) — Rotation 嘗試順序依命中分布重排
 - [ADR-10](./adr/ADR-10-cstimer-worker-offload.md) — cstimer genFacelet 移到 Web Worker
+- [ADR-11](./adr/ADR-11-tpr-4x4-not-portable.md) — TPR-4x4 直接整合不可行；cstimer-444 是 JS 生態天花板
 
 ## Layer diagram
 

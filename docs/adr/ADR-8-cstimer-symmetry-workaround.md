@@ -69,4 +69,4 @@ cstimer 內部用 **48-element 對稱群**做 IDA* 剪枝：
 
 ## Future
 
-如果 `vendor/tpr-4x4.js`（cs0x7f 的正規 solve API）被整合，這整套 workaround 可以拆除，預期同時拿到 6× 速度提升和 30% 短解。當前優先級不高。
+理論上若有純 JS 版 TPR-4x4 正規 solve API，這整套 workaround 可拆除，預期 6× 速度提升 + 30% 短解。**但 [ADR-11](./ADR-11-tpr-4x4-not-portable.md) 已研究確認 TPR 是 Java、無 JS port**，當前生態下這條路徑不可行。此 workaround 因此是長期解，不是過渡。
