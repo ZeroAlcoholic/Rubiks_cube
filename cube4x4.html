@@ -2494,7 +2494,7 @@
 
             ensureAvailable() {
                 if (!window.Cube || typeof Cube.fromString !== 'function' || typeof Cube.initSolver !== 'function') {
-                    throw new Error('cubejs solver 尚未載入。請確認網路可連線到 unpkg CDN。');
+                    throw new Error('cubejs solver 尚未載入 — 請確認 vendor/cubejs-1.3.2.js 可被瀏覽器讀取。');
                 }
             }
 
@@ -8827,10 +8827,19 @@
                 // Cube.initSolver() 同步建構約 12M 條目的 BFS pruning tables
                 // （桌機 3-5s，手機 5-15s）。趁使用者掃描的閒置時間先把表建好，
                 // 避免解題時主執行緒卡死、按鈕停在「初始化 Kociemba」訊息。
-                const preloadKociemba = () => {
+                //
+                // Scanner gate: Safari/iOS 沒 requestIdleCallback，會退化成 2s setTimeout。
+                // 如果使用者那時已經開了 scanner，5-15s 的同步 initSolver() 會卡死
+                // camera preview。先檢查 scanner-panel 是否可見，若可見就 reschedule。
+                const tryPreloadKociemba = () => {
                     if (!window.Cube || typeof Cube.initSolver !== 'function') return;
                     const solver = window.game && window.game.solver;
                     if (!solver || solver.initialized) return;
+                    const scannerEl = document.getElementById('scanner-panel');
+                    if (scannerEl && !scannerEl.classList.contains('hidden')) {
+                        setTimeout(tryPreloadKociemba, 2000);
+                        return;
+                    }
                     try {
                         const t0 = performance.now();
                         console.log('[KOCIEMBA] 背景預熱 Cube.initSolver() — 開始');
@@ -8842,9 +8851,9 @@
                     }
                 };
                 if (typeof requestIdleCallback === 'function') {
-                    requestIdleCallback(preloadKociemba, { timeout: 5000 });
+                    requestIdleCallback(tryPreloadKociemba, { timeout: 5000 });
                 } else {
-                    setTimeout(preloadKociemba, 2000);
+                    setTimeout(tryPreloadKociemba, 2000);
                 }
             }
         };
