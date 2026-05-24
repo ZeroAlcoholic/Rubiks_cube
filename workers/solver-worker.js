@@ -42,13 +42,129 @@ await loadClassic('../vendor/cubejs-1.3.2.js', ['Cube']);
 await loadClassic('../vendor/cstimer-444.js', ['scramble_444', 'mathlib']);
 
 // ── 3. Import the modular solver and teaching content ──────────────
-const { ReductionSolver } = await import('../core/solver/reduction.js');
-const { TEACHING_4X4 }    = await import('../content/teaching-4x4.js');
+// Bump the version query when reduction.js / teaching-4x4.js change so the
+// browser module cache (which workers share across page loads) re-fetches.
+// Without this, an old in-memory module can keep running even after the
+// underlying file changes — a classic dev-time gotcha but also relevant in
+// production immediately after a deploy.
+const MODULE_VERSION = 3;
+const { ReductionSolver } = await import(`../core/solver/reduction.js?v=${MODULE_VERSION}`);
+const { TEACHING_4X4 }    = await import(`../content/teaching-4x4.js?v=${MODULE_VERSION}`);
 
 // ── 4. Construct the solver. preload() runs on first init message. ──
 const solver = new ReductionSolver({ N: 4, teaching: TEACHING_4X4 });
 
-// ── 5. Message dispatch ─────────────────────────────────────────────
+// ── 5. IndexedDB cache for BFS lookup tables ────────────────────────
+// The Centers BFS build is deterministic for a fixed reduction.js code
+// path, so we persist the resulting tables to IndexedDB on first run and
+// re-use them on subsequent visits. Bump TABLE_VERSION when reduction.js
+// changes the key encoding or table contents in a way that invalidates
+// previously cached data.
+const IDB_NAME = 'rubiks-bfs-cache';
+const IDB_VERSION = 1;
+const TABLE_VERSION = 1;
+const TABLE_NAMES = ['udPair', 'fbPair', 'sortJoint'];
+
+function openCacheDB() {
+    return new Promise((resolve, reject) => {
+        if (typeof indexedDB === 'undefined') {
+            reject(new Error('indexedDB unavailable in this worker context'));
+            return;
+        }
+        const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+        req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains('tables')) {
+                db.createObjectStore('tables', { keyPath: 'name' });
+            }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror   = () => reject(req.error);
+    });
+}
+
+// Serialize each Map<bitmask, {pk, move}> into three parallel typed arrays
+// for compact storage and fast structured-clone copy through IDB.
+function serializeTable(map) {
+    const size = map.size;
+    const keys  = new Uint32Array(size);
+    const pks   = new Uint32Array(size);
+    const moves = new Array(size);
+    let i = 0;
+    for (const [k, v] of map) {
+        keys[i]  = k;
+        // pk === null marks the BFS root; use 0xFFFFFFFF as sentinel
+        pks[i]   = v.pk == null ? 0xFFFFFFFF : v.pk;
+        moves[i] = v.move == null ? '' : v.move;
+        i++;
+    }
+    return { keys, pks, moves };
+}
+
+function deserializeTable({ keys, pks, moves }) {
+    const map = new Map();
+    for (let i = 0; i < keys.length; i++) {
+        const pk = pks[i] === 0xFFFFFFFF ? null : pks[i];
+        const move = moves[i] === '' ? null : moves[i];
+        map.set(keys[i], { pk, move });
+    }
+    return map;
+}
+
+async function loadCachedTables() {
+    let db;
+    try { db = await openCacheDB(); }
+    catch (e) { console.log('[solver-worker] IDB open failed:', e?.message); return null; }
+    try {
+        const rows = await new Promise((resolve, reject) => {
+            const tx = db.transaction('tables', 'readonly');
+            const req = tx.objectStore('tables').getAll();
+            req.onsuccess = () => resolve(req.result);
+            req.onerror   = () => reject(req.error);
+        });
+        console.log('[solver-worker] IDB rows found:', rows.length, rows.map(r => `${r.name}@v${r.version}(${r.keys?.length})`));
+        const byName = new Map(rows.map(r => [r.name, r]));
+        for (const name of TABLE_NAMES) {
+            const row = byName.get(name);
+            if (!row) { console.log('[solver-worker] cache miss: no row for', name); return null; }
+            if (row.version !== TABLE_VERSION) { console.log('[solver-worker] cache miss: version mismatch', name, row.version); return null; }
+        }
+        const tables = {};
+        for (const name of TABLE_NAMES) {
+            tables[name] = deserializeTable(byName.get(name));
+        }
+        console.log('[solver-worker] cache HIT — all 3 tables loaded');
+        return tables;
+    } catch (e) {
+        console.warn('[solver-worker] IDB read failed:', e);
+        return null;
+    } finally {
+        db.close();
+    }
+}
+
+async function saveCachedTables(tables) {
+    let db;
+    try { db = await openCacheDB(); }
+    catch (e) { return; /* silently no-cache */ }
+    try {
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction('tables', 'readwrite');
+            for (const name of TABLE_NAMES) {
+                const ser = serializeTable(tables[name]);
+                tx.objectStore('tables').put({ name, version: TABLE_VERSION, ...ser });
+            }
+            tx.oncomplete = () => resolve();
+            tx.onerror    = () => reject(tx.error);
+        });
+    } catch (e) {
+        console.warn('[solver-worker] IDB write failed (quota? private mode?):', e);
+    } finally {
+        db.close();
+    }
+}
+
+// ── 6. Message dispatch ─────────────────────────────────────────────
 let initialized = false;
 
 self.onmessage = async (e) => {
@@ -57,11 +173,19 @@ self.onmessage = async (e) => {
     try {
         if (type === 'init') {
             if (!initialized) {
-                self.postMessage({ type: 'init-progress', step: 'centers', percent: 10 });
-                // Building the BFS tables takes ~3s desktop / ~10s mobile.
-                // It happens here in the worker, so the main thread is free
-                // to render the 3D cube and accept user input the whole time.
-                await solver.preload();
+                // 1. Try to skip BFS build by loading cached tables.
+                self.postMessage({ type: 'init-progress', step: 'cache-check', percent: 5 });
+                const cached = await loadCachedTables();
+                if (cached) {
+                    self.postMessage({ type: 'init-progress', step: 'cache-hit', percent: 60 });
+                    await solver.preload({ cachedTables: cached });
+                } else {
+                    // First run (or cache miss). Build BFS tables, then write to IDB.
+                    self.postMessage({ type: 'init-progress', step: 'centers', percent: 10 });
+                    await solver.preload();
+                    // Fire-and-forget save — never block init on IDB write.
+                    saveCachedTables(solver._tables);
+                }
                 self.postMessage({ type: 'init-progress', step: 'done', percent: 100 });
                 initialized = true;
             }

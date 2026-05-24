@@ -443,34 +443,50 @@ export class ReductionSolver {
     /**
      * Precompute lookup tables. Called automatically on first solve.
      * Safe to call multiple times (idempotent via promise caching).
+     *
+     * @param {object} [options]
+     * @param {{udPair:Map,fbPair:Map,sortJoint:Map}} [options.cachedTables]
+     *        If provided, skip BFS construction and use these tables verbatim.
+     *        Allows IndexedDB-based persistence: the host loads serialized tables,
+     *        injects them here, and the 3-10 s build is skipped entirely.
+     *        The caller is responsible for verifying schema compatibility (e.g.,
+     *        via a stored version number) before passing them in.
      */
-    async preload() {
+    async preload(options = {}) {
         if (!this._preloadPromise) {
-            this._preloadPromise = this._buildTables();
+            this._preloadPromise = this._buildTables(options);
         }
         return this._preloadPromise;
     }
 
-    async _buildTables() {
-        const t0 = perf.start('centers-preload');
-        const solvedCS = extractCenterState(this.SOLVED, this.allCenterIdx);
-
-        const udPerms    = _buildUDpairPerms(this.centerPerms);
-        const fbPerms    = _buildFBpairPerms(this.centerPerms, this._moves.preserveUDpair);
-        const jointPerms = _buildSortJointPerms(this.centerPerms, this._moves.preserveUDFBpair);
-
-        this._tables = {
-            udPair:    _buildUDpairTable(solvedCS,    this._moves.all,              udPerms),
-            fbPair:    _buildFBpairTable(solvedCS,    this._moves.preserveUDpair,   fbPerms),
-            sortJoint: _buildSortJointTable(solvedCS, this._moves.preserveUDFBpair, jointPerms),
-        };
-        const ms = t0();
-        logger.solve('centers-preload-done', {
-            ms,
-            udPair:    this._tables.udPair.size,
-            fbPair:    this._tables.fbPair.size,
-            sortJoint: this._tables.sortJoint.size,
-        });
+    async _buildTables({ cachedTables } = {}) {
+        if (cachedTables && cachedTables.udPair && cachedTables.fbPair && cachedTables.sortJoint) {
+            // Trust the caller's verification — just adopt the maps.
+            this._tables = cachedTables;
+            logger.solve('centers-loaded-from-cache', {
+                udPair:    cachedTables.udPair.size,
+                fbPair:    cachedTables.fbPair.size,
+                sortJoint: cachedTables.sortJoint.size,
+            });
+        } else {
+            const t0 = perf.start('centers-preload');
+            const solvedCS = extractCenterState(this.SOLVED, this.allCenterIdx);
+            const udPerms    = _buildUDpairPerms(this.centerPerms);
+            const fbPerms    = _buildFBpairPerms(this.centerPerms, this._moves.preserveUDpair);
+            const jointPerms = _buildSortJointPerms(this.centerPerms, this._moves.preserveUDFBpair);
+            this._tables = {
+                udPair:    _buildUDpairTable(solvedCS,    this._moves.all,              udPerms),
+                fbPair:    _buildFBpairTable(solvedCS,    this._moves.preserveUDpair,   fbPerms),
+                sortJoint: _buildSortJointTable(solvedCS, this._moves.preserveUDFBpair, jointPerms),
+            };
+            const ms = t0();
+            logger.solve('centers-preload-done', {
+                ms,
+                udPair:    this._tables.udPair.size,
+                fbPair:    this._tables.fbPair.size,
+                sortJoint: this._tables.sortJoint.size,
+            });
+        }
 
         // Pre-warm cstimer if already loaded (idempotent: becomes no-op after first call).
         // Prefer the injected caller so a worker-backed proxy warms in the worker thread.

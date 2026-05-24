@@ -2087,10 +2087,15 @@
         }
         window.setLoadingProgress = setLoadingProgress;
 
+        // Bump WORKER_VERSION when workers/solver-worker.js or its imports
+        // (core/solver/reduction.js, content/teaching-4x4.js) materially change.
+        // The query param defeats the worker module cache so the new code takes
+        // effect on next page load without a manual hard-reload.
+        const WORKER_VERSION = 3;
         function createSolverWorkerProxy(onFatal, onProgress) {
             let worker;
             try {
-                worker = new Worker('workers/solver-worker.js', { type: 'module' });
+                worker = new Worker(`workers/solver-worker.js?v=${WORKER_VERSION}`, { type: 'module' });
             } catch (err) {
                 console.warn('[solver-worker] failed to spawn:', err);
                 return null;
@@ -2238,9 +2243,11 @@
             // onProgress — relay worker progress messages to the loading overlay.
             (type, payload) => {
                 if (type === 'init-progress') {
-                    const label = payload.step === 'centers' ? '建立中心查找表(worker,約 3-10s)'
-                              : payload.step === 'done'     ? '解題引擎就緒'
-                              :                                `初始化中(${payload.step})`;
+                    const label = payload.step === 'cache-check' ? '檢查 IndexedDB 快取…'
+                              : payload.step === 'cache-hit'   ? '從 IndexedDB 載入查找表(<1s)'
+                              : payload.step === 'centers'     ? '建立中心查找表(worker,約 3-10s)'
+                              : payload.step === 'done'        ? '解題引擎就緒'
+                              :                                   `初始化中(${payload.step})`;
                     setLoadingProgress(payload.percent, label);
                 }
             }
