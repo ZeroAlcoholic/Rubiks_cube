@@ -47,12 +47,22 @@ await loadClassic('../vendor/cstimer-444.js', ['scramble_444', 'mathlib']);
 // Without this, an old in-memory module can keep running even after the
 // underlying file changes — a classic dev-time gotcha but also relevant in
 // production immediately after a deploy.
-const MODULE_VERSION = 3;
-const { ReductionSolver } = await import(`../core/solver/reduction.js?v=${MODULE_VERSION}`);
-const { TEACHING_4X4 }    = await import(`../content/teaching-4x4.js?v=${MODULE_VERSION}`);
+const MODULE_VERSION = 4;
+const { createSolver, SOLVER_VARIANTS } = await import(`../core/solver/solver-registry.js?v=${MODULE_VERSION}`);
+const { TEACHING_4X4 }                  = await import(`../content/teaching-4x4.js?v=${MODULE_VERSION}`);
 
-// ── 4. Construct the solver. preload() runs on first init message. ──
-const solver = new ReductionSolver({ N: 4, teaching: TEACHING_4X4 });
+// ── 4. Solver lifecycle —— may swap variants on subsequent init messages.
+//
+// Strategy: keep the current solver instance + its preload promise on
+// module-scope. When the host sends init({variant}) for a NEW variant, we
+// build a fresh instance but PASS THROUGH the existing baked tables so we
+// don't re-fetch or re-build BFS data — only the post-centers strategy
+// (cstimer vs cubejs vs Yau wrapper) changes.
+let solver = await createSolver('fast', { teaching: TEACHING_4X4 });
+let currentVariant = 'fast';
+// Shared cache of BFS tables. After first init, every variant reuses these
+// instead of touching IDB / network / BFS again.
+let sharedCachedTables = null;
 
 // ── 5. IndexedDB cache for BFS lookup tables ────────────────────────
 // The Centers BFS build is deterministic for a fixed reduction.js code
@@ -260,19 +270,21 @@ self.onmessage = async (e) => {
     const { id, type } = msg;
     try {
         if (type === 'init') {
+            // The host may send init({variant}) to switch to a different solver
+            // (e.g. 'fast-kociemba', 'yau-teach'). If the variant differs from
+            // the current one, rebuild the solver instance — but pass through
+            // the shared BFS tables so we never re-do the expensive table load.
+            const requestedVariant = (msg.variant && SOLVER_VARIANTS[msg.variant])
+                ? msg.variant : 'fast';
+
             if (!initialized) {
-                // Three-tier init path. Each tier is strictly faster than the
-                // next, so we try in order and stop at the first success:
-                //
+                // First-time init: three-tier table loading.
                 //   1. IDB cache hit       — returning user, ~50-300 ms
                 //   2. Baked tables fetch  — new user (SW cache hit ~100 ms;
                 //                             cold network ~3-6 s on 4G)
                 //   3. Fresh BFS build     — fallback for older browsers
                 //                             (no DecompressionStream) or any
                 //                             fetch/parse failure; 3-10 s CPU
-                //
-                // On success of tier 2 we also write to IDB so the next visit
-                // hits tier 1 without re-fetching.
                 self.postMessage({ type: 'init-progress', step: 'cache-check', percent: 5 });
                 let cached = await loadCachedTables();
                 let source = cached ? 'idb' : null;
@@ -285,22 +297,31 @@ self.onmessage = async (e) => {
 
                 if (cached) {
                     self.postMessage({ type: 'init-progress', step: source === 'idb' ? 'cache-hit' : 'baked-hit', percent: 70 });
+                    sharedCachedTables = cached;
                     await solver.preload({ cachedTables: cached });
-                    // If we just loaded from baked, populate IDB so subsequent
-                    // visits skip the network entirely (~100 ms vs ~600 ms even
-                    // with SW cache hit). Fire-and-forget — never block init.
                     if (source === 'baked') saveCachedTables(cached);
                 } else {
-                    // First run AND fetch failed (or DecompressionStream unsupported).
-                    // Build BFS tables fresh, save to IDB.
                     self.postMessage({ type: 'init-progress', step: 'centers', percent: 20 });
                     await solver.preload();
-                    saveCachedTables(solver._tables);
+                    sharedCachedTables = solver._tables;
+                    saveCachedTables(sharedCachedTables);
                 }
                 self.postMessage({ type: 'init-progress', step: 'done', percent: 100 });
                 initialized = true;
             }
-            self.postMessage({ id, type: 'init-done' });
+
+            // Variant switch (may happen on first init OR later). If the
+            // requested variant differs from what we currently have, rebuild.
+            // The new instance reuses sharedCachedTables so this is ~10 ms,
+            // not a re-init of the heavy lookup tables.
+            if (requestedVariant !== currentVariant) {
+                self.postMessage({ type: 'init-progress', step: 'variant-swap', percent: 100, variant: requestedVariant });
+                solver = await createSolver(requestedVariant, { teaching: TEACHING_4X4 });
+                currentVariant = requestedVariant;
+                if (sharedCachedTables) await solver.preload({ cachedTables: sharedCachedTables });
+            }
+
+            self.postMessage({ id, type: 'init-done', variant: currentVariant });
             return;
         }
         if (type === 'solve') {

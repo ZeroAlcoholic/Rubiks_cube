@@ -13,6 +13,7 @@
     <link rel="preload" as="script" href="vendor/orbitcontrols-r128.js">
     <link rel="preload" as="script" href="vendor/cubejs-1.3.2.js">
     <link rel="modulepreload" href="workers/solver-worker.js">
+    <link rel="modulepreload" href="core/solver/solver-registry.js">
     <link rel="modulepreload" href="core/solver/reduction.js">
     <link rel="modulepreload" href="core/geometry/perms-n.js">
     <link rel="modulepreload" href="core/geometry/cube-geometry-n.js">
@@ -108,6 +109,19 @@
             background: linear-gradient(135deg, rgba(34, 197, 94, 0.22), rgba(20, 83, 45, 0.42));
             border-color: #22c55e;
         }
+        /* Solver variant <select> styled to match the surrounding .btn pills.
+           The native select dropdown isn't 100% restylable across browsers but
+           the trigger pill matches; the dropdown menu inherits OS-default look. */
+        select.variant-select {
+            appearance: none;
+            -webkit-appearance: none;
+            padding-right: 28px;
+            background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='white' d='M0 0l5 6 5-6z'/></svg>");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
+            cursor: pointer;
+        }
+        select.variant-select:focus { outline: 2px solid rgba(134,239,172,0.55); outline-offset: 1px; }
 
         #win-msg {
             position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -878,6 +892,11 @@
                 <button id="solve-btn" class="btn solve-btn" onclick="game.autoSolve()">
                     <span>🧠</span> <span id="solve-text">自動解題</span>
                 </button>
+                <select id="solver-variant" class="btn variant-select" onchange="game.setSolverVariant(this.value)" title="切換解題引擎">
+                    <option value="fast" selected>速解</option>
+                    <option value="fast-kociemba">兩階段最佳</option>
+                    <option value="yau-teach">教學版 Yau ⚗︎</option>
+                </select>
                 <button class="btn" onclick="game.reset()">
                     <span>🔄</span> 重置
                 </button>
@@ -1113,7 +1132,8 @@
         // The query param defeats the worker module cache so the new code takes
         // effect on next page load without a manual hard-reload.
         // v5: added baked-tables fetch path (tier 2 between IDB cache and BFS build).
-        const WORKER_VERSION = 5;
+        // v6: solver registry — worker accepts {variant} in init message.
+        const WORKER_VERSION = 6;
         function createSolverWorkerProxy(onFatal, onProgress) {
             // Mutable internal state — `cancelCurrent()` resets the worker and
             // resets these closures so a fresh worker spawns and the proxy
@@ -1192,14 +1212,28 @@
                     worker.postMessage({ id, type, ...payload });
                 });
             }
+            // Track the currently-loaded variant so setVariant() can detect a
+            // no-op (don't pay even the postMessage round-trip when the user
+            // re-selects the same option).
+            let currentVariant = 'fast';
             return {
-                preload: () => {
+                preload: (variant = 'fast') => {
+                    currentVariant = variant;
                     // Cache the kickoff so callers calling preload() multiple
                     // times (e.g., after cancel + retry) get the same in-flight
                     // promise. Re-created in cancelCurrent().
-                    if (!preloadKickoff) preloadKickoff = send('init', {});
+                    if (!preloadKickoff) preloadKickoff = send('init', { variant });
                     return preloadKickoff;
                 },
+                // Switch solver variant. Returns a promise that resolves when
+                // the worker has rebuilt its solver instance (cheap: ~10 ms
+                // because BFS tables are shared across variants).
+                setVariant: (variant) => {
+                    if (variant === currentVariant) return Promise.resolve();
+                    currentVariant = variant;
+                    return send('init', { variant });
+                },
+                get variant() { return currentVariant; },
                 solve: async (state, options = {}) => {
                     activeSolveCallbacks = {
                         onStatus:   options.onStatus,
@@ -7093,6 +7127,31 @@
                     `(history persists in localStorage key 'rubiks_bench_history')`,
                 );
                 out.textContent = lines.join('\n');
+            }
+
+            // Switch solver variant. Called from the <select id="solver-variant">
+            // onchange handler. The proxy.setVariant() resolves quickly because
+            // BFS tables are shared across variants — only the post-centers
+            // strategy (cstimer vs cubejs vs Yau wrapper) is rebuilt.
+            async setSolverVariant(variant) {
+                const allowed = ['fast', 'fast-kociemba', 'yau-teach'];
+                if (!allowed.includes(variant)) return;
+                const proxy = window.__reduction?.solver;
+                if (!proxy || typeof proxy.setVariant !== 'function') {
+                    // Main-thread fallback path doesn't support multi-variant
+                    // (it instantiated ReductionSolver directly). Silently keep
+                    // current variant — user gets the default 'fast' solver.
+                    console.log('[variant] fallback path active, variant switch ignored');
+                    return;
+                }
+                try {
+                    await window.__reduction.ready;   // ensure first init complete
+                    await proxy.setVariant(variant);
+                    console.log('[variant] switched to', variant);
+                    this.updateTestStatus('diag', `已切換到「${variant}」解題引擎`);
+                } catch (e) {
+                    console.warn('[variant] switch failed:', e);
+                }
             }
 
             async autoSolve(options = {}) {

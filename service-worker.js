@@ -25,7 +25,9 @@ const SHELL = [
     './vendor/cstimer-444.js',
     // 4×4 solver module graph
     './workers/solver-worker.js',
+    './core/solver/solver-registry.js',
     './core/solver/reduction.js',
+    './core/solver/yau-solver.js',
     './core/geometry/perms-n.js',
     './core/geometry/cube-geometry-n.js',
     './core/infra/errors.js',

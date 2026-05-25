@@ -399,15 +399,35 @@ function pathFromTable(table, initKey) {
 // ─── ReductionSolver ─────────────────────────────────────────────────────────
 
 export class ReductionSolver {
-    constructor({ N, teaching } = {}) {
+    /**
+     * @param {object} opts
+     * @param {number} opts.N — only N=4 is supported (centers algorithm is hard-coded)
+     * @param {object} [opts.teaching] — phase teaching notes keyed by phase name
+     * @param {'cstimer'|'cubejs'} [opts.finisher='cstimer'] — which solver handles
+     *        the 3×3 finishing phase AFTER edges+parity are done by cstimer.
+     *        - 'cstimer': use cstimer's combined edges+parity+3×3 output as-is
+     *                     (current default — proven, no extra cost)
+     *        - 'cubejs':  cstimer for edges+parity, then cubejs.solve() for 3×3
+     *                     (Kociemba two-phase, often -2 to -5 moves on the 3×3
+     *                     suffix; adds ~5-15 s one-time Cube.initSolver() cost
+     *                     to first solve when cubejs hasn't been initialized)
+     */
+    constructor({ N, teaching, finisher = 'cstimer' } = {}) {
         if (N !== 4) {
             throw new SolverError(
                 `ReductionSolver currently only supports N=4 (centers algorithm is hard-coded for 24 positions), got ${N}`,
                 { kind: 'invalid-config' }
             );
         }
+        if (finisher !== 'cstimer' && finisher !== 'cubejs') {
+            throw new SolverError(
+                `Unknown finisher "${finisher}" — must be 'cstimer' or 'cubejs'`,
+                { kind: 'invalid-config' }
+            );
+        }
         this.N = N;
         this.teaching = teaching || {};
+        this.finisher = finisher;
         // Optional override for the cstimer caller — when set, replaces the
         // default globalThis.scramble_444 lookup. Host (browser) attaches a
         // worker-backed proxy here to offload genFacelet onto a Web Worker;
@@ -786,12 +806,39 @@ export class ReductionSolver {
             if (postEdges[i].includes('w')) lastWide = i;
         }
         const parityMoves   = lastWide >= 0 ? postEdges.slice(0, lastWide + 1) : [];
-        const kociembaMoves = lastWide >= 0 ? postEdges.slice(lastWide + 1)    : postEdges;
+        let kociembaMoves   = lastWide >= 0 ? postEdges.slice(lastWide + 1)    : postEdges;
+
+        // OPTIONAL FINISHER OVERRIDE — when finisher === 'cubejs', re-solve the
+        // 3×3 phase using cubejs Kociemba two-phase instead of accepting cstimer's
+        // tail. cstimer's tail is already two-phase (cs0x7f's internal impl), but
+        // cubejs sometimes produces a different/shorter sequence on the same state.
+        //
+        // Cost: cubejs.initSolver() builds ~12 MB pruning tables on first call.
+        // We cache the init promise on the class so subsequent solves are <100 ms.
+        // For 'cstimer' (default), this branch is skipped — zero added cost.
+        if (this.finisher === 'cubejs') {
+            try {
+                const replacement = await this._cubejsFinish(state, allMoves.slice(0, edgesEnd + parityMoves.length));
+                if (replacement) {
+                    logger.solve('cubejs-finisher-applied', {
+                        cstimerKociembaMoves: kociembaMoves.length,
+                        cubejsMoves: replacement.length,
+                        delta: replacement.length - kociembaMoves.length,
+                    });
+                    kociembaMoves = replacement;
+                }
+            } catch (e) {
+                // Fall back to cstimer's tail silently — never break solve() over
+                // a finisher hiccup. Log for telemetry.
+                logger.solve('cubejs-finisher-skipped', { reason: e.message || String(e) });
+            }
+        }
 
         logger.solve('cstimer-phases', {
             edges: edgesEnd,
             parity: parityMoves.length,
             kociemba: kociembaMoves.length,
+            finisher: this.finisher,
         });
 
         return {
@@ -819,4 +866,72 @@ export class ReductionSolver {
             _telemetry: telemetry,
         };
     }
+
+    /**
+     * Re-solve the 3×3 phase using cubejs Kociemba two-phase.
+     *
+     * Pipeline:
+     *   1. Apply edges + parity moves to the original 96-char state — now the
+     *      4×4 is "centers solved, edges paired, parity fixed", which is
+     *      isomorphic to a 3×3 cube.
+     *   2. Extract the 54-char 3×3 representation by picking ONE sticker per
+     *      cubie face (corners + one of each paired edge + one center).
+     *   3. Run cubejs Cube.fromString(state54).solve() → returns a Kociemba move
+     *      sequence in standard 3×3 notation (R / U / F / D / L / B + ' / 2).
+     *   4. These are valid 4×4 outer moves verbatim, so we return them as-is.
+     *
+     * @param {string} startState96 — the state BEFORE cstimer ran (pre-edges)
+     * @param {string[]} reductionMoves — cstimer's edges+parity prefix moves
+     * @returns {string[]|null} replacement 3×3 moves, or null if state was already solved
+     */
+    async _cubejsFinish(startState96, reductionMoves) {
+        const Cube = globalThis.Cube;
+        if (!Cube) throw new Error('cubejs (window.Cube) not loaded');
+        // Init pruning tables once per worker. ~5-15 s the FIRST time, <1 ms after.
+        // We cache the promise on the class constructor so concurrent solves share.
+        if (!ReductionSolver._cubejsInitPromise) {
+            ReductionSolver._cubejsInitPromise = (async () => {
+                const t0 = Date.now();
+                Cube.initSolver();
+                logger.solve('cubejs-init', { ms: Date.now() - t0 });
+            })();
+        }
+        await ReductionSolver._cubejsInitPromise;
+
+        // Apply reduction prefix to land in 3×3-isomorphic state
+        const reduced96 = reductionMoves.length
+            ? applyMoves(this.perms, startState96, reductionMoves)
+            : startState96;
+
+        const state54 = _extract3x3State(reduced96);
+        if (state54 === SOLVED_3X3) return [];
+
+        const cube = Cube.fromString(state54);
+        if (cube.isSolved()) return [];
+        // solve() returns space-separated move notation. Empty string is possible
+        // for the already-solved case but we filtered that above.
+        const algStr = cube.solve();
+        return algStr ? algStr.trim().split(/\s+/).filter(Boolean) : [];
+    }
+}
+
+// ─── 3×3 state extraction from 4×4 reduced state ─────────────────────────────
+//
+// After centers solved + edges paired + parity fixed, the 4×4 is isomorphic to
+// a 3×3. Pick one sticker per cubie face: corners (positions 0/3/12/15), one
+// of each paired edge (1/4/7/13 — outer of each pair), and a center sticker (5).
+//
+// This mapping is order-preserving: the resulting 54-char string reads as a
+// valid 3×3 facelet representation in URFDLB convention, exactly what cubejs
+// Cube.fromString() expects.
+const _3X3_PICK = [0, 1, 3, 4, 5, 7, 12, 13, 15];
+const SOLVED_3X3 = 'UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB';
+
+function _extract3x3State(state96) {
+    let s = '';
+    for (let f = 0; f < 6; f++) {
+        const base = f * 16;
+        for (const p of _3X3_PICK) s += state96[base + p];
+    }
+    return s;
 }
