@@ -137,7 +137,8 @@ rubiks_cube/
 - **不在 `autoSolve` 中繼續依賴 `moveStack`**：掃描進來的方塊無歷史紀錄，這個方向已死
 - **不把 Kociemba 完整表格內嵌 HTML**：100MB+ 不可行，min2phase CDN 是唯一選項
 - **不宣稱 100% 顏色辨識準確率**：必須保留手動修色 UI，這是系統穩定性的核心保障
-- **不做 PWA「加入主畫面」**：已廢棄，不需要 manifest.json / service-worker.js
+- **不做 PWA「加入主畫面」UX**：不寫 manifest.json，不要 install banner / app icon set / splash screen
+  - **但 `service-worker.js` 可作為純前端快取技術使用**：precache shell + vendor JS + BFS binaries，讓二訪 TTI <100ms 並支援離線。SW 純快取與 PWA 安裝體驗是兩件事，這裡只禁後者。
 
 ---
 
