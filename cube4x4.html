@@ -895,7 +895,7 @@
                 <select id="solver-variant" class="btn variant-select" onchange="game.setSolverVariant(this.value)" title="切換解題引擎">
                     <option value="fast" selected>速解</option>
                     <option value="fast-kociemba">兩階段最佳</option>
-                    <option value="yau-teach">教學版 Yau ⚗︎</option>
+                    <option value="yau-teach">教學版 Yau (beta)</option>
                 </select>
                 <button class="btn" onclick="game.reset()">
                     <span>🔄</span> 重置
@@ -1362,6 +1362,15 @@
                 window.__reduction.solver = local;
                 window.__reduction.viaWorker = false;
                 setLoadingProgress(100, '就緒');
+                // Fallback path doesn't support multi-variant — disable the
+                // selector so the user gets honest UI feedback (this iOS Safari
+                // 14 / private-mode scenario should be very rare in practice).
+                const sel = document.getElementById('solver-variant');
+                if (sel) {
+                    sel.value = 'fast';
+                    sel.disabled = true;
+                    sel.title = '此瀏覽器走主執行緒備援模式，僅支援預設「速解」';
+                }
                 return local;
             });
         }

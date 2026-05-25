@@ -263,9 +263,23 @@ async function saveCachedTables(tables) {
 }
 
 // ── 6. Message dispatch ─────────────────────────────────────────────
+// Workers receive messages on the JS event loop but each `async` handler
+// runs CONCURRENTLY (interleaved at awaits). That creates a race when the
+// host pipes `init` (variant swap) and `solve` back-to-back: the solve
+// handler can read `solver` mid-swap and end up calling the wrong variant.
+//
+// Fix: serialize all message handling through a single promise chain so
+// only one handler runs at a time. Cost: solve waits for any in-flight
+// variant swap (~10 ms — negligible). Termination via worker.terminate()
+// still bypasses this chain, so the cancel path is unaffected.
 let initialized = false;
+let _msgChain = Promise.resolve();
 
-self.onmessage = async (e) => {
+self.onmessage = (e) => {
+    _msgChain = _msgChain.then(() => _handleMessage(e));
+};
+
+async function _handleMessage(e) {
     const msg = e.data || {};
     const { id, type } = msg;
     try {
@@ -357,7 +371,7 @@ self.onmessage = async (e) => {
     } catch (err) {
         self.postMessage({ id, type: 'error', error: err?.message || String(err) });
     }
-};
+}
 
 // Signal that the worker is fully bootstrapped (vendor loaded, solver created).
 // Main thread uses this to know when it's safe to send 'init'.
