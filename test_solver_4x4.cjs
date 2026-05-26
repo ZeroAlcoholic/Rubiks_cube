@@ -1,102 +1,70 @@
-// 4×4 求解器端到端測試 — 從 cube4x4.html 抽出 PERMS_4 + ReductionSolver4，
-// 在 Node 中跑「scramble → solve → verify」迴圈。
+// 4×4 求解器端到端測試 — 使用 core/solver/reduction.js (ESM) + 預烤 BFS 表
 //
-// 跑法：node test_solver_4x4.js
+// 跑法：node test_solver_4x4.cjs
 //
-// 目的：找出「validate 通過、但 solver 產生爛 moves」的狀態。
-// 這些是嚴格驗證捕捉不到的 solver 端缺陷（OLL/PLL parity、edge pairing 卡住等）。
+// 目的：
+//   - 幾何正確性（applyMove、PERMS_4 完整性、寬 move）
+//   - 驗證 scramble 狀態通過 StateValidator4
+//   - ReductionSolver.solve() 在 Node 環境（無 cstimer）回傳 centers phase 正確
+//   - post-reduce sanity check 邏輯驗證
 
 'use strict';
 
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
-const vm = require('vm');
+const zlib = require('zlib');
 
 const ref = require('./test_logic_4x4.cjs');
 
-const html = fs.readFileSync(path.join(__dirname, 'cube4x4.html'), 'utf8');
-
-function extractBlock(src, marker, endMarker) {
-    const start = src.indexOf(marker);
-    if (start < 0) throw new Error('marker not found: ' + marker);
-    const end = src.indexOf(endMarker, start);
-    if (end < 0) throw new Error('end marker not found: ' + endMarker);
-    return src.slice(start, end);
-}
-
-// FACE_COORDS (constants used by buildPerms4)
-const faceCoordsBlock = extractBlock(html, 'const FACE_COORDS = {', '\n        const TWO_SHOT_SCANS');
-// buildPerms4 function
-const buildPermsBlock = extractBlock(html, 'function buildPerms4()', 'const PERMS_4 = buildPerms4();');
-// ReductionSolver4 class
-const reductionBlock = extractBlock(html, 'class ReductionSolver4 {', '\n        class CubeJSSolverAdapter {');
-
-// 構造 vm context
-const context = {
-    STATE_FACE_ORDER: ref.STATE_FACE_ORDER,
-    STICKERS_PER_FACE: ref.STICKERS_PER_FACE,
-    SOLVED_STATE: ref.SOLVED_STATE,
-    Cube: null,            // cubejs 不在 Node 跑（沒裝），讓 _hasPLLParity 走 catch 路徑
-    console,
-    performance: { now: () => Date.now() },
-};
-vm.createContext(context);
-
-const code = `
-${faceCoordsBlock}
-${buildPermsBlock}
-const PERMS_4 = buildPerms4();
-${reductionBlock}
-this.PERMS_4 = PERMS_4;
-this.ReductionSolver4 = ReductionSolver4;
-this.FACE_COORDS = FACE_COORDS;
-`;
-vm.runInContext(code, context);
-
-const PERMS_4 = context.PERMS_4;
-const ReductionSolver4 = context.ReductionSolver4;
-
-// ── 純 JS apply-move：用 PERMS_4 套用一個 move（同 ReductionSolver4._applyMove）
-function applyMove(state, notation) {
-    const perm = PERMS_4[notation];
-    if (!perm) throw new Error('No perm for ' + notation);
-    const arr = state.split('');
-    const res = new Array(96);
-    for (let i = 0; i < 96; i++) res[perm[i]] = arr[i];
-    return res.join('');
-}
-
-function applyMoves(state, moves) {
-    let s = state;
-    for (const m of moves) s = applyMove(s, m);
-    return s;
-}
-
-// ── 產生 scramble move sequence（隨機，但避免立即反轉同面）
-const ALL_MOVES = Object.keys(PERMS_4); // 所有可用 notation
-const BASE_MOVES = ['U','R','F','D','L','B','Uw','Rw','Fw','Dw','Lw','Bw'];
-const SUFFIXES = ['', "'", '2'];
-
-function randomScramble(length) {
-    const moves = [];
-    let lastBase = null;
-    for (let i = 0; i < length; i++) {
-        let base;
-        do {
-            base = BASE_MOVES[Math.floor(Math.random() * BASE_MOVES.length)];
-        } while (base === lastBase);
-        const suf = SUFFIXES[Math.floor(Math.random() * SUFFIXES.length)];
-        moves.push(base + suf);
-        lastBase = base;
+// ── 重用 baked table 解析（同 workers/solver-worker.js）
+const BAKED_MAGIC = 0x52424653;
+function parseBakedTable(arrayBuffer, tableName) {
+    const view = new DataView(arrayBuffer);
+    if (view.getUint32(0, true) !== BAKED_MAGIC) throw new Error(`${tableName}: bad magic`);
+    if (view.getUint32(4, true) !== 1)           throw new Error(`${tableName}: unsupported version`);
+    const numEntries = view.getUint32(8,  true);
+    const numMoves   = view.getUint32(12, true);
+    const dec = new TextDecoder();
+    const moves = new Array(numMoves);
+    for (let i = 0; i < numMoves; i++) {
+        const slot = new Uint8Array(arrayBuffer, 16 + i * 4, 4);
+        let end = 4;
+        while (end > 0 && slot[end - 1] === 0) end--;
+        moves[i] = dec.decode(slot.subarray(0, end));
     }
-    return moves;
+    const dictBytes = numMoves * 4;
+    const keys     = new Uint32Array(arrayBuffer, 16 + dictBytes,                  numEntries);
+    const pks      = new Uint32Array(arrayBuffer, 16 + dictBytes + numEntries * 4, numEntries);
+    const moveIdxs = new Uint8Array (arrayBuffer, 16 + dictBytes + numEntries * 8, numEntries);
+    const map = new Map();
+    for (let i = 0; i < numEntries; i++) {
+        const pk   = pks[i]      === 0xFFFFFFFF ? null : pks[i];
+        const move = moveIdxs[i] === 0xFF       ? null : moves[moveIdxs[i]];
+        map.set(keys[i], { pk, move });
+    }
+    return map;
+}
+
+function loadBakedTables() {
+    const dir = path.join(__dirname, 'vendor', 'bfs-tables');
+    const tables = {};
+    for (const name of ['udPair', 'fbPair', 'sortJoint']) {
+        const p = path.join(dir, `${name}.bin.gz`);
+        if (!fs.existsSync(p)) return null;
+        const gz  = fs.readFileSync(p);
+        const raw = zlib.gunzipSync(gz);
+        const buf = new ArrayBuffer(raw.byteLength);
+        new Uint8Array(buf).set(raw);
+        tables[name] = parseBakedTable(buf, name);
+    }
+    return tables;
 }
 
 // ── 測試 runner
 let pass = 0, fail = 0;
 const failures = [];
 function check(cond, name, extra) {
-    if (cond) pass++;
+    if (cond) { pass++; }
     else {
         fail++;
         failures.push({ name, extra });
@@ -104,230 +72,202 @@ function check(cond, name, extra) {
     }
 }
 
-// ============================================================
-console.log('=== T1: applyMove SOLVED → notation → 反向 → SOLVED ===');
-// 套用一個 move 後再套用其反向，應該回到 SOLVED
-for (const base of BASE_MOVES) {
-    for (const suf of SUFFIXES) {
-        const move = base + suf;
-        const inv = suf === '' ? base + "'" : suf === "'" ? base : base + '2';
-        const after = applyMove(ref.SOLVED_STATE, move);
-        const back = applyMove(after, inv);
-        check(back === ref.SOLVED_STATE, `${move} then ${inv} → SOLVED`);
+// ── 隨機 scramble 產生器
+const BASE_MOVES = ['U','R','F','D','L','B','Uw','Rw','Fw','Dw','Lw','Bw'];
+const SUFFIXES   = ['', "'", '2'];
+function randomScramble(length) {
+    const moves = [];
+    let lastBase = null;
+    for (let i = 0; i < length; i++) {
+        let base;
+        do { base = BASE_MOVES[Math.floor(Math.random() * BASE_MOVES.length)]; }
+        while (base === lastBase);
+        moves.push(base + SUFFIXES[Math.floor(Math.random() * SUFFIXES.length)]);
+        lastBase = base;
     }
+    return moves;
 }
 
-// ============================================================
-console.log('\n=== T2: scrambled 狀態通過嚴格驗證 ===');
-// 從 SOLVED 套用 N 步隨機 scramble，產生的狀態都應通過 StateValidator4
-const SCRAMBLE_TRIALS = 30;
-let validScrambles = 0;
-const scrambleHistory = [];
-for (let trial = 0; trial < SCRAMBLE_TRIALS; trial++) {
-    const moves = randomScramble(10 + trial); // 10..39 步
-    const scrambled = applyMoves(ref.SOLVED_STATE, moves);
-    const v = ref.validateState4Strict(scrambled);
-    if (v.ok) {
-        validScrambles++;
-        scrambleHistory.push({ moves, state: scrambled });
-    } else {
-        console.log(`  ✗ scramble #${trial} ${moves.length} 步未通過驗證: severity=${v.severity}`);
-        console.log(`     moves: ${moves.join(' ')}`);
-        console.log(`     errors: ${v.errors.slice(0, 2).join('; ')}`);
-    }
-}
-check(validScrambles === SCRAMBLE_TRIALS,
-    `${SCRAMBLE_TRIALS} 個隨機 scramble 都應通過 strict validator`,
-    `${validScrambles}/${SCRAMBLE_TRIALS} 通過`);
-
-// ============================================================
-console.log('\n=== T3: ReductionSolver4 對 scramble 的回應 ===');
-// 拿前 10 個合法 scramble 跑 solver，檢查結果
-const SOLVE_TRIALS = Math.min(10, scrambleHistory.length);
-let solverCenterOk = 0, solverEdgesOk = 0, solverState3Valid = 0;
-for (let i = 0; i < SOLVE_TRIALS; i++) {
-    const { moves, state } = scrambleHistory[i];
-    let result;
-    try {
-        const solver = new ReductionSolver4();
-        result = solver.solve(state);
-    } catch (e) {
-        console.log(`  ✗ scramble #${i}: solver throw — ${e.message}`);
-        continue;
-    }
-
-    // 套用 moveList 到原 scramble，看結果
-    let finalState;
-    try {
-        finalState = applyMoves(state, result.moveList);
-    } catch (e) {
-        console.log(`  ✗ scramble #${i}: 套用 solver 輸出 moves 時 throw — ${e.message}`);
-        continue;
-    }
-
-    // 檢查中心格是否全部就位（每個面 4 個中心 idx [5,6,9,10] 都是該 face）
-    const CENTER_IDXS = [5, 6, 9, 10];
-    let centersOk = true;
-    ref.STATE_FACE_ORDER.forEach((face, fi) => {
-        const base = fi * 16;
-        for (const ci of CENTER_IDXS) {
-            if (finalState[base + ci] !== face) { centersOk = false; break; }
-        }
-    });
-    if (centersOk) solverCenterOk++;
-
-    // 檢查邊塊配對（每對 edge cubie 的兩張貼紙應該配對）
-    let edgesOk = true;
-    const EDGE_DEFS = [
-        [1,82,2,81],[4,65,8,66],[7,18,11,17],[13,33,14,34],
-        [49,45,50,46],[52,78,56,77],[55,29,59,30],[61,94,62,93],
-        [20,39,24,43],[23,84,27,88],[36,71,40,75],[87,68,91,72],
-    ];
-    for (const e of EDGE_DEFS) {
-        const c1 = finalState[e[0]], c2 = finalState[e[1]];
-        const c3 = finalState[e[2]], c4 = finalState[e[3]];
-        // paired = (c1===c3 && c2===c4)
-        if (!(c1 === c3 && c2 === c4)) { edgesOk = false; break; }
-    }
-    if (edgesOk) solverEdgesOk++;
-
-    // 檢查 state3 格式
-    if (typeof result.state3 === 'string' && result.state3.length === 54 && /^[URFDLB]{54}$/.test(result.state3)) {
-        solverState3Valid++;
-    }
-
-    if (!centersOk || !edgesOk) {
-        console.log(`  - scramble #${i} (${moves.length} moves): centers=${centersOk ? '✓' : '✗'} edges=${edgesOk ? '✓' : '✗'} | solver 產生 ${result.moveList.length} 步`);
-    }
-}
-console.log(`  centers solved: ${solverCenterOk}/${SOLVE_TRIALS}`);
-console.log(`  edges paired:   ${solverEdgesOk}/${SOLVE_TRIALS}`);
-console.log(`  state3 valid:   ${solverState3Valid}/${SOLVE_TRIALS}`);
-// 不強制全部通過 — 這是診斷測試。但至少 state3 格式必須對。
-check(solverState3Valid === SOLVE_TRIALS, 'solver 至少輸出格式合法的 state3');
-
-// ============================================================
-console.log('\n=== T4: ReductionSolver4 對 SOLVED 應該幾乎無操作 ===');
-{
-    const solver = new ReductionSolver4();
-    const r = solver.solve(ref.SOLVED_STATE);
-    check(r.state3 === 'UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB',
-        'SOLVED 的 3×3 等價狀態也是 SOLVED', `got: ${r.state3}`);
-    // 對 SOLVED 不應吐出非平凡 moves（至少 reductions 應該是 0 步或全是 no-op）
-    console.log(`  SOLVED 經過 reduce 產生 ${r.moveList.length} 步`);
-    // 注意：當前 solver 對 SOLVED 仍可能輸出一些「平衡用」moves 因為它不檢測 already-solved；
-    // 不強制 0 步，只記錄。
-}
-
-// ============================================================
-console.log('\n=== T5: 偵測 PERMS_4 的完整性 ===');
-{
-    // 應該包含所有 6 面 × 3 方向 = 18 個外層 move + 6 wide × 3 = 18 個寬 move = 36 個
-    const expectedNotations = [];
-    for (const f of ['U','R','F','D','L','B']) {
-        expectedNotations.push(f, f + "'", f + '2');
-        expectedNotations.push(f + 'w', f + "w'", f + 'w2');
-    }
-    const missing = expectedNotations.filter(n => !PERMS_4[n]);
-    check(missing.length === 0, `所有預期 notation 都在 PERMS_4 中`,
-        `missing: ${missing.join(', ')}`);
-}
-// 每個 perm 應為 0..95 的排列
-{
-    let badPerm = null;
-    for (const [name, perm] of Object.entries(PERMS_4)) {
-        if (perm.length !== 96) { badPerm = name; break; }
-        const sorted = [...perm].sort((a,b) => a - b);
-        for (let i = 0; i < 96; i++) {
-            if (sorted[i] !== i) { badPerm = name; break; }
-        }
-        if (badPerm) break;
-    }
-    check(badPerm === null, `每個 perm 都是 0..95 的合法排列`, badPerm ? `bad: ${badPerm}` : null);
-}
-
-// ============================================================
-console.log('\n=== T6: 寬 move 相當於外層 + 內層的組合 ===');
-// Rw 應該等同 R + 內層切片同方向旋轉。
-// 我們可以驗證：Rw 的 perm[15] (UFR 右上角貼紙) 應該等於 R 的 perm[15]，
-// 因為兩者都把外層的 UFR 變成同一處。
-{
-    // 簡單檢查：對 SOLVED 套用 R 後與套用 Rw 後的 R 面（state[16..31]）應該相同
-    const afterR = applyMove(ref.SOLVED_STATE, 'R');
-    const afterRw = applyMove(ref.SOLVED_STATE, 'Rw');
-    // R 面外層的 4 個 sticker（每 row 的最右一個）應該都旋轉了
-    // 對 SOLVED 任何 outer R 旋轉都不改變 R 面的顏色（仍全 R），只改變相鄰面
-    check(afterR.slice(16, 32) === 'R'.repeat(16),
-        'SOLVED + R 後 R 面仍全 R');
-    check(afterRw.slice(16, 32) === 'R'.repeat(16),
-        'SOLVED + Rw 後 R 面仍全 R');
-    // 但 Rw 還會把內層也轉，所以 U/F/D/B 面中間欄會有不同
-    check(afterR !== afterRw,
-        'Rw 與 R 在內層應該不同');
-}
-
-// ============================================================
-console.log('\n=== T7: post-reduce sanity check（純邏輯版） ===');
-// 模擬 RubiksGame._verifyReducedState 的邏輯，並驗證它在 reduce 失敗時正確擋下。
+// ── post-reduce sanity check（純邏輯版）
+const CENTER_IDXS = [5, 6, 9, 10];
+const EDGE_DEFS = [
+    [1,82,2,81],[4,65,8,66],[7,18,11,17],[13,33,14,34],
+    [49,45,50,46],[52,78,56,77],[55,29,59,30],[61,94,62,93],
+    [20,39,24,43],[23,84,27,88],[36,71,40,75],[87,68,91,72],
+];
 function verifyReducedState(state) {
-    const CENTER_IDXS = [5, 6, 9, 10];
     for (let fi = 0; fi < ref.STATE_FACE_ORDER.length; fi++) {
         const face = ref.STATE_FACE_ORDER[fi];
         const base = fi * 16;
         for (const ci of CENTER_IDXS) {
-            if (state[base + ci] !== face) {
-                return { ok: false, reason: `${face} 面中心未就位` };
-            }
+            if (state[base + ci] !== face) return { ok: false, reason: `${face} 面中心未就位` };
         }
     }
-    const EDGE_DEFS = [
-        [1,82,2,81],[4,65,8,66],[7,18,11,17],[13,33,14,34],
-        [49,45,50,46],[52,78,56,77],[55,29,59,30],[61,94,62,93],
-        [20,39,24,43],[23,84,27,88],[36,71,40,75],[87,68,91,72],
-    ];
     let unpaired = 0;
     for (const e of EDGE_DEFS) {
-        const c1 = state[e[0]], c2 = state[e[1]];
-        const c3 = state[e[2]], c4 = state[e[3]];
-        if (!(c1 === c3 && c2 === c4)) unpaired++;
+        if (!(state[e[0]] === state[e[2]] && state[e[1]] === state[e[3]])) unpaired++;
     }
     if (unpaired > 0) return { ok: false, reason: `${unpaired} 對邊塊未配對` };
     return { ok: true };
 }
 
-// (a) SOLVED 應通過
-check(verifyReducedState(ref.SOLVED_STATE).ok, 'SOLVED 通過 post-reduce check');
+// ────────────────────────────────────────────────────────────────────────────
+(async () => {
+    // Load ESM modules via dynamic import
+    const { buildPerms, applyMove: _applyMove, applyMoves: _applyMoves, inverseNotation, inverseMoves }
+        = await import('./core/geometry/perms-n.js');
+    const { ReductionSolver } = await import('./core/solver/reduction.js');
 
-// (b) 隨機 scramble 不應通過（中心亂掉）
-{
-    const moves = randomScramble(15);
-    const scrambled = applyMoves(ref.SOLVED_STATE, moves);
-    const r = verifyReducedState(scrambled);
-    check(!r.ok, '隨機 scramble 不應通過 post-reduce check', `reason: ${r.reason}`);
-}
+    const PERMS_4 = buildPerms(4);
 
-// (c) 把 ReductionSolver4 的「輸出狀態」也跑一次 verify — 期望大多失敗（記錄為診斷）
-let solverReducePassed = 0;
-for (let i = 0; i < SOLVE_TRIALS; i++) {
-    const { state } = scrambleHistory[i];
-    const solver = new ReductionSolver4();
-    const result = solver.solve(state);
-    const reduced = applyMoves(state, result.moveList);
-    const r = verifyReducedState(reduced);
-    if (r.ok) solverReducePassed++;
-}
-console.log(`  diagnostic: ${solverReducePassed}/${SOLVE_TRIALS} scrambles 真正完成 reduction`);
-// 對 ReductionSolver4 而言，我們已知有缺陷 — 不要 fail 測試，只記錄。
-// 但 verifyReducedState 本身必須在 SOLVED 上通過、在 scrambled 上不通過。
-check(solverReducePassed >= 0 && solverReducePassed <= SOLVE_TRIALS,
-    'solver 部分成功率在合理範圍 (僅診斷)');
+    // Thin wrappers that match the old string-based test API
+    function applyMove(state, notation) {
+        return _applyMove(PERMS_4, state, notation);
+    }
+    function applyMoves(state, moves) {
+        return _applyMoves(PERMS_4, state, moves);
+    }
 
-console.log('\n────────────────────────────');
-console.log(`  ${pass} passed, ${fail} failed (total ${pass + fail})`);
-if (fail > 0) {
-    console.log('\n失敗：');
-    failures.forEach(f => console.log('  •', f.name, f.extra ? '| ' + f.extra : ''));
-    process.exit(1);
-}
-console.log('  ✓ 全部通過');
-process.exit(0);
+    // ============================================================
+    console.log('=== T1: applyMove SOLVED → notation → 反向 → SOLVED ===');
+    for (const base of BASE_MOVES) {
+        for (const suf of SUFFIXES) {
+            const move = base + suf;
+            const inv = inverseNotation(move);
+            const after = applyMove(ref.SOLVED_STATE, move);
+            const back  = applyMove(after, inv);
+            check(back === ref.SOLVED_STATE, `${move} then ${inv} → SOLVED`);
+        }
+    }
+
+    // ============================================================
+    console.log('\n=== T2: scrambled 狀態通過嚴格驗證 ===');
+    const SCRAMBLE_TRIALS = 30;
+    let validScrambles = 0;
+    const scrambleHistory = [];
+    for (let trial = 0; trial < SCRAMBLE_TRIALS; trial++) {
+        const moves     = randomScramble(10 + trial);
+        const scrambled = applyMoves(ref.SOLVED_STATE, moves);
+        const v = ref.validateState4Strict(scrambled);
+        if (v.ok) {
+            validScrambles++;
+            scrambleHistory.push({ moves, state: scrambled });
+        } else {
+            console.log(`  ✗ scramble #${trial} ${moves.length} 步未通過驗證: ${v.errors?.[0]}`);
+        }
+    }
+    check(validScrambles === SCRAMBLE_TRIALS,
+        `${SCRAMBLE_TRIALS} 個隨機 scramble 都應通過 strict validator`,
+        `${validScrambles}/${SCRAMBLE_TRIALS} 通過`);
+
+    // ============================================================
+    console.log('\n=== T3: ReductionSolver centers phase（Node 環境，無 cstimer）===');
+    const tables = loadBakedTables();
+    check(tables !== null, 'baked tables 可載入');
+
+    const SOLVE_TRIALS = Math.min(10, scrambleHistory.length);
+    let centerOk = 0, resultShapeOk = 0;
+    if (tables) {
+        const solver = new ReductionSolver({ N: 4 });
+        await solver.preload({ cachedTables: tables });
+        for (let i = 0; i < SOLVE_TRIALS; i++) {
+            const { state } = scrambleHistory[i];
+            let result;
+            try {
+                result = await solver.solve(state);
+            } catch (e) {
+                console.log(`  ✗ scramble #${i}: solver throw — ${e.message}`);
+                continue;
+            }
+            // 回傳格式 { phases, totalMoves, solverName }
+            if (result && Array.isArray(result.phases) && typeof result.totalMoves === 'number') {
+                resultShapeOk++;
+            }
+            // centers phase（第 0 個）應讓所有面中心就位
+            const centersPhase = result?.phases?.[0];
+            if (centersPhase) {
+                const afterCenters = applyMoves(state, centersPhase.moves.map(m => m.notation));
+                let ok = true;
+                for (let fi = 0; fi < ref.STATE_FACE_ORDER.length; fi++) {
+                    const face = ref.STATE_FACE_ORDER[fi];
+                    const base = fi * 16;
+                    for (const ci of CENTER_IDXS) {
+                        if (afterCenters[base + ci] !== face) { ok = false; break; }
+                    }
+                    if (!ok) break;
+                }
+                if (ok) centerOk++;
+            }
+        }
+    }
+    console.log(`  centers solved: ${centerOk}/${SOLVE_TRIALS}`);
+    console.log(`  result shape ok: ${resultShapeOk}/${SOLVE_TRIALS}`);
+    check(resultShapeOk === SOLVE_TRIALS, 'solver 輸出格式符合 { phases, totalMoves }');
+    check(centerOk === SOLVE_TRIALS, `所有 ${SOLVE_TRIALS} 個 scramble 的 centers phase 正確歸位`);
+
+    // ============================================================
+    console.log('\n=== T4: ReductionSolver 對 SOLVED 應回傳 trivial（0 步）===');
+    {
+        const solver = new ReductionSolver({ N: 4 });
+        await solver.preload({ cachedTables: tables });
+        const r = await solver.solve(ref.SOLVED_STATE);
+        check(r.totalMoves === 0, 'SOLVED → totalMoves === 0', `got: ${r.totalMoves}`);
+        check(Array.isArray(r.phases) && r.phases.length > 0, 'SOLVED → phases 陣列非空');
+    }
+
+    // ============================================================
+    console.log('\n=== T5: PERMS_4 完整性 ===');
+    {
+        const expected = [];
+        for (const f of ['U','R','F','D','L','B']) {
+            expected.push(f, f+"'", f+'2', f+'w', f+"w'", f+'w2');
+        }
+        const missing = expected.filter(n => !PERMS_4[n]);
+        check(missing.length === 0, '所有預期 notation 都在 PERMS_4 中',
+            missing.length ? `missing: ${missing.join(', ')}` : null);
+    }
+    {
+        let badPerm = null;
+        for (const [name, perm] of Object.entries(PERMS_4)) {
+            if (perm.length !== 96) { badPerm = name; break; }
+            const sorted = [...perm].sort((a, b) => a - b);
+            for (let i = 0; i < 96; i++) {
+                if (sorted[i] !== i) { badPerm = name; break; }
+            }
+            if (badPerm) break;
+        }
+        check(badPerm === null, '每個 perm 都是 0..95 的合法排列',
+            badPerm ? `bad: ${badPerm}` : null);
+    }
+
+    // ============================================================
+    console.log('\n=== T6: 寬 move 與外層 move 的關係 ===');
+    {
+        const afterR  = applyMove(ref.SOLVED_STATE, 'R');
+        const afterRw = applyMove(ref.SOLVED_STATE, 'Rw');
+        check(afterR.slice(16, 32)  === 'R'.repeat(16), 'SOLVED + R  後 R 面仍全 R');
+        check(afterRw.slice(16, 32) === 'R'.repeat(16), 'SOLVED + Rw 後 R 面仍全 R');
+        check(afterR !== afterRw, 'Rw 與 R 在內層應該不同');
+    }
+
+    // ============================================================
+    console.log('\n=== T7: post-reduce sanity check（純邏輯版）===');
+    check(verifyReducedState(ref.SOLVED_STATE).ok, 'SOLVED 通過 post-reduce check');
+    {
+        const moves     = randomScramble(15);
+        const scrambled = applyMoves(ref.SOLVED_STATE, moves);
+        const r = verifyReducedState(scrambled);
+        check(!r.ok, '隨機 scramble 不應通過 post-reduce check', `reason: ${r.reason}`);
+    }
+
+    // ============================================================
+    console.log('\n────────────────────────────');
+    console.log(`  ${pass} passed, ${fail} failed (total ${pass + fail})`);
+    if (fail > 0) {
+        console.log('\n失敗：');
+        failures.forEach(f => console.log('  •', f.name, f.extra ? '| ' + f.extra : ''));
+        process.exit(1);
+    }
+    console.log('  ✓ 全部通過');
+    process.exit(0);
+})().catch(e => { console.error(e); process.exit(1); });
