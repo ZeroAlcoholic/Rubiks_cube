@@ -2,7 +2,7 @@
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>4×4 魔術方塊掃描解題系統</title>
     <meta name="theme-color" content="#03110d">
 
@@ -36,7 +36,8 @@
         }
         #canvas-container {
             width: 100vw;
-            height: 100vh;
+            height: 100vh;   /* fallback */
+            height: 100dvh;  /* 行動瀏覽器：用動態視窗高，網址列收合不會讓畫面被截斷 */
             position: absolute;
             top: 0;
             left: 0;
@@ -54,9 +55,21 @@
            doesn't render under the bottom panel. --guide-h is set by JS to
            the live measured panel height + a small margin. */
         body.guide-visible #canvas-container {
-            height: calc(100vh - var(--guide-h, 180px));
+            height: calc(100vh - var(--guide-h, 180px));   /* fallback */
+            height: calc(100dvh - var(--guide-h, 180px));
         }
-        .ui-layer { position: absolute; z-index: 10; pointer-events: none; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; padding: 20px; box-sizing: border-box; }
+        .ui-layer {
+            position: absolute; z-index: 10; pointer-events: none;
+            width: 100%;
+            height: 100vh;   /* fallback */
+            height: 100dvh;
+            display: flex; flex-direction: column; justify-content: space-between;
+            padding: 20px;
+            /* 瀏海／Home 列安全區內縮（viewport-fit=cover 後才有效） */
+            padding-top: max(20px, env(safe-area-inset-top));
+            padding-bottom: max(20px, env(safe-area-inset-bottom));
+            box-sizing: border-box;
+        }
         .text-3xl { font-size: 1.875rem; line-height: 2.25rem; }
         .text-white { color: #fff; }
         .font-bold { font-weight: 700; }
@@ -141,7 +154,8 @@
             top: 50%;
             transform: translate(-50%, -50%);
             width: min(760px, calc(100vw - 24px));
-            max-height: calc(100vh - 24px);
+            max-height: calc(100vh - 24px);   /* fallback */
+            max-height: calc(100dvh - 24px);
             overflow: auto;
             padding: 18px;
             border: 1px solid rgba(134, 239, 172, 0.28);
@@ -195,7 +209,7 @@
         .solve-guide {
             position: absolute;
             left: 50%;
-            bottom: 18px;
+            bottom: max(18px, env(safe-area-inset-bottom));
             transform: translateX(-50%);
             z-index: 25;
             width: min(760px, calc(100vw - 24px));
@@ -259,6 +273,24 @@
             .guide-controls .btn { padding: 5px 10px; font-size: 0.85rem; }
             .guide-footer { margin-top: 4px; gap: 4px; }
             .guide-speed-btn { padding: 2px 8px !important; font-size: 0.7rem !important; }
+        }
+
+        /* 手機直立窄螢幕：壓縮頂部標題與控制列，避免 9 顆按鈕大量換行把版面撐爆，
+           並在解題引導開啟時隱藏主控制鈕，避免與底部播放列重疊。 */
+        @media (max-width: 640px) {
+            .ui-layer {
+                padding: 12px;
+                padding-top: max(12px, env(safe-area-inset-top));
+                padding-bottom: max(12px, env(safe-area-inset-bottom));
+            }
+            .top-bar h1 { font-size: 1.25rem; margin-top: 0; }
+            .top-bar .instruction { display: none; }   /* 副標小螢幕隱藏，省垂直空間 */
+            .controls-row { gap: 6px; margin-bottom: 6px; }
+            .controls-row .btn,
+            .controls-row select.variant-select {
+                padding: 7px 11px; font-size: 0.72rem; letter-spacing: 0.5px;
+            }
+            body.guide-visible #main-controls { display: none; }
         }
 
         /* Loading overlay — shown until ReductionSolver is ready.
@@ -866,7 +898,7 @@
             <p id="test-status" data-test-status="idle"></p>
         </div>
         
-        <div class="flex flex-col items-center mb-6">
+        <div id="main-controls" class="flex flex-col items-center mb-6">
             <div class="controls-row">
                 <button id="cam-lock-btn" class="btn" onclick="game.toggleCameraLock()">
                     <span id="cam-lock-icon">🔓</span> <span id="cam-lock-text">視角自由</span>
@@ -3590,11 +3622,13 @@
                 const palette = this.buildProgressivePalette();
                 this.shotReviewRejectedAnchors = [];  // kept for snapshot compatibility
 
+                // 中心格位置：4×4 為內 2×2 [5,6,9,10]（CENTER_POS_4），3×3 為 [4]
+                const centerSet = new Set(this.N === 4 ? CENTER_POS_4 : [4]);
                 this.shotReviewCurrentPanels = rawPanels.map(panel => {
                     const colors = [], confidence = [];
                     panel.stickers.forEach((rgb, i) => {
                         let face, conf;
-                        if (i === 4) {
+                        if (centerSet.has(i)) {
                             // Center sticker: identity determined by which face faces the camera,
                             // not by color — avoids misclassifying under unusual lighting.
                             face = panel.expectedFace || panel.slot;
@@ -4593,195 +4627,98 @@
 
             // 六面掃描完成後若奇偶校驗失敗，暴力搜尋 4^6=4096 種面旋轉組合，
             // 找到通過 cubejs 驗證的版本後直接套用（不需使用者手動翻轉）。
-            _tryAutoOrientFaces() {
-                if (STICKERS_PER_FACE !== 9) return null; // 4×4: scanConfirmedFaces arrays are length 16, not 9
-                if (!window.Cube) return null;
-                const ROT = [
-                    [0,1,2,3,4,5,6,7,8],  // 0°
-                    [6,3,0,7,4,1,8,5,2],  // 90° CW
-                    [8,7,6,5,4,3,2,1,0],  // 180°
-                    [2,5,8,1,4,7,0,3,6],  // 270° CW
-                ];
+            // 為 N×N 面格建立 4 種旋轉的索引表：[id, 90°CW, 180°, 270°CW]。
+            // 每個表長度 N²，out[newPos] = oldPos（讀取舊位置填到新位置）。
+            // 90° CW 定義：new(r,c) = old(N-1-c, r)。180/270 由連續套用 90 得到。
+            static _faceRotationMaps(N) {
+                const sz = N * N;
+                const id = Array.from({ length: sz }, (_, i) => i);
+                const rotate90 = src => {
+                    const out = new Array(sz);
+                    for (let r = 0; r < N; r++) {
+                        for (let c = 0; c < N; c++) {
+                            out[r * N + c] = src[(N - 1 - c) * N + r];
+                        }
+                    }
+                    return out;
+                };
+                const r90 = rotate90(id);
+                const r180 = rotate90(r90);
+                const r270 = rotate90(r180);
+                return [id, r90, r180, r270];
+            }
+
+            // 面內旋轉搜尋（4×4）：使用者拍攝時方塊可能傾斜，導致某些面被擷取成
+            // 旋轉 90°/180°/270° 的朝向，組出的 96 字元 state 角塊/邊塊色組非法。
+            // 對 4⁶=4096 種「每面各自旋轉」組合重建 state，用 StateValidator4 篩出
+            // 角塊+邊塊全合法者，取「總旋轉量最小」的解（偏向使用者只是輕微傾斜）。
+            //
+            // 注意：合法 ≠ 必可解（StateValidator4 不含 permutation parity）；若選到的
+            //       朝向實際不可解，solver 失敗會由 _showHandoffError 接手，且
+            //       buildSolutionForCurrentState 的「套完整解須回到 SOLVED」後驗證是最終防線。
+            _tryFaceRotationFix() {
+                if (this.N !== 4) return null;
+                const SPF = STICKERS_PER_FACE; // 16
                 const faces = STATE_FACE_ORDER;
-                for (let mask = 1; mask < 4096; mask++) {
+                const maps = RubiksGame._faceRotationMaps(this.N); // [id,90,180,270]
+                // 每面預先算好 4 種旋轉後的字串，避免在 4096 迴圈裡重複 map
+                const rotated = {};
+                for (const f of faces) {
+                    const arr = this.scanConfirmedFaces[f];
+                    if (!arr || arr.length !== SPF) return null;
+                    rotated[f] = maps.map(m => m.map(i => arr[i]).join(''));
+                }
+                const rotCost = r => (r === 0 ? 0 : r === 2 ? 2 : 1); // 180 算 2 步、90/270 算 1 步
+                let best = null, bestCost = Infinity;
+                for (let mask = 0; mask < 4096; mask++) {
+                    let cost = 0;
+                    for (let fi = 0; fi < 6; fi++) cost += rotCost((mask >> (fi * 2)) & 3);
+                    if (cost >= bestCost) continue; // 不可能比已找到的解更省
                     let state = '';
-                    let valid = true;
                     for (let fi = 0; fi < 6; fi++) {
-                        const orig = this.scanConfirmedFaces[faces[fi]];
-                        if (!orig || orig.length !== 9) { valid = false; break; }
-                        const r = (mask >> (fi * 2)) & 3;
-                        state += (r === 0 ? orig : ROT[r].map(i => orig[i])).join('');
+                        state += rotated[faces[fi]][(mask >> (fi * 2)) & 3];
                     }
-                    if (!valid) return null;
-                    try {
-                        const cube = Cube.fromString(state);
-                        if (cube.asString() === state) {
-                            // 套用旋轉回 scanConfirmedFaces
-                            for (let fi = 0; fi < 6; fi++) {
-                                const r = (mask >> (fi * 2)) & 3;
-                                if (r !== 0) {
-                                    const f = faces[fi];
-                                    this.scanConfirmedFaces[f] = ROT[r].map(i => this.scanConfirmedFaces[f][i]);
-                                }
-                            }
-                            return state;
-                        }
-                    } catch (e) { /* 無效組合，繼續 */ }
+                    if (StateValidator4.validate(state).ok) {
+                        best = { mask, state };
+                        bestCost = cost;
+                        if (cost === 0) break; // 已是零旋轉解，不可能更好
+                    }
                 }
-                return null;
+                if (!best) return null;
+                // 套用最佳旋轉回 scanConfirmedFaces（與既有自動修正行為一致）
+                for (let fi = 0; fi < 6; fi++) {
+                    const r = (best.mask >> (fi * 2)) & 3;
+                    if (r !== 0) {
+                        const f = faces[fi];
+                        this.scanConfirmedFaces[f] = maps[r].map(i => this.scanConfirmedFaces[f][i]);
+                    }
+                }
+                return best.state;
             }
 
-            // 整體方塊朝向搜尋：嘗試 48 種立方體朝向重新分配 + 每個再嘗試 4096 種面內旋轉
-            // 適用情境：使用者拿方塊的方向不是標準 URFDLB（例如把橙色朝上而不是黃色朝上）
-            //   結果是六個中心顏色都對但 cubejs 認為角塊組合不合法
-            //   需要把整顆方塊「旋轉」到標準朝向才能通過驗證
-            _tryCubeOrientations() {
-                if (STICKERS_PER_FACE !== 9) return null; // 4×4: not applicable
-                if (!window.Cube) return null;
-                const FACES = ['U', 'R', 'F', 'D', 'L', 'B'];
-                const opposites = {U:'D', R:'L', F:'B', D:'U', L:'R', B:'F'};
-
-                // 生成 48 種「面標籤指派」（其中 24 種為合法立方體旋轉，另 24 種為鏡射；
-                // 鏡射版會被 cubejs 自動拒絕，不影響正確性，只是多花一點時間）
-                const orientations = [];
-                for (const newU of FACES) {
-                    const newD = opposites[newU];
-                    const sides = FACES.filter(f => f !== newU && f !== newD);
-                    for (const newF of sides) {
-                        const newB = opposites[newF];
-                        const rest = sides.filter(f => f !== newF && f !== newB);
-                        for (const newR of rest) {
-                            const newL = opposites[newR];
-                            orientations.push({ U: newU, R: newR, F: newF, D: newD, L: newL, B: newB });
-                        }
-                    }
-                }
-
-                const savedFaces = {};
-                FACES.forEach(f => savedFaces[f] = [...(this.scanConfirmedFaces[f] || [])]);
-
-                // 記錄原始材質色（整體朝向調整後需同步更新材質顏色）
-                const origMatColors = {};
-                FACES.forEach(f => {
-                    origMatColors[f] = this.materials[FACE_TO_MATERIAL_INDEX[f]].color.getHex();
-                });
-
-                // 跳過第一個（identity）— 如果 identity 能通過，前面 _tryAutoOrientFaces 已經試過了
-                for (let oi = 0; oi < orientations.length; oi++) {
-                    const orient = orientations[oi];
-                    const isIdentity = FACES.every(f => orient[f] === f);
-                    if (isIdentity) continue;
-
-                    // 反查表：原本標籤 X 在新朝向下變成什麼
-                    const inverseOrient = {};
-                    FACES.forEach(f => { inverseOrient[orient[f]] = f; });
-
-                    // 重組 scanConfirmedFaces：位置 f 現在裝的是原本位置 orient[f] 的資料
-                    // 同時把 sticker 字母也重新標籤
-                    const newFaces = {};
-                    FACES.forEach(f => {
-                        const original = savedFaces[orient[f]];
-                        if (!original || original.length !== 9) {
-                            newFaces[f] = null;
-                            return;
-                        }
-                        newFaces[f] = original.map(letter => inverseOrient[letter] || letter);
-                    });
-                    if (FACES.some(f => !newFaces[f])) continue;
-
-                    // 暫時套用此朝向，跑 4096 面內旋轉
-                    this.scanConfirmedFaces = newFaces;
-                    const fixed = this._tryAutoOrientFaces();
-                    if (fixed) {
-                        // 同步更新材質顏色：orient[newFace] = 原本哪個 slot 的資料移到 newFace
-                        // 使 setState() 後 3D 模型顯示正確的實體顏色
-                        FACES.forEach(newFace => {
-                            const oldFace = orient[newFace];
-                            this.materials[FACE_TO_MATERIAL_INDEX[newFace]].color.setHex(origMatColors[oldFace]);
-                        });
-                        return fixed;
-                    }
-                }
-
-                // 全部失敗 — 還原
-                this.scanConfirmedFaces = savedFaces;
-                return null;
-            }
-
-            // 對調搜尋：嘗試所有「未鎖定貼紙」的兩兩交換，看是否能通過 cubejs 驗證
-            // 適用於：使用者手動修色後造成兩個位置標記反了的情境
-            //   例：F[0] 應為 L 結果填了 F；L[2] 應為 F 結果填了 L
-            //   greedy 平衡無法處理，但對調搜尋可以
-            _trySwapPairs() {
-                if (STICKERS_PER_FACE !== 9) return null; // 4×4: labels would be 96, not 54
-                if (!window.Cube) return null;
-                const labels = STATE_FACE_ORDER.flatMap(f => this.scanConfirmedFaces[f] || Array(9).fill(f));
-                if (labels.length !== 54) return null;
-                const userEdited = new Array(54).fill(false);
-                STATE_FACE_ORDER.forEach((f, fi) => {
-                    const edits = (this.scanFaceUserEdits || {})[f] || [];
-                    for (let i = 0; i < 9; i++) if (edits[i]) userEdited[fi * 9 + i] = true;
-                });
-                const CENTERS = new Set([4, 13, 22, 31, 40, 49]);
-                const isLocked = pos => CENTERS.has(pos) || userEdited[pos];
-
-                for (let i = 0; i < 54; i++) {
-                    if (isLocked(i)) continue;
-                    for (let j = i + 1; j < 54; j++) {
-                        if (isLocked(j)) continue;
-                        if (labels[i] === labels[j]) continue;
-                        // 嘗試 swap
-                        [labels[i], labels[j]] = [labels[j], labels[i]];
-                        const candidate = labels.join('');
-                        try {
-                            const cube = Cube.fromString(candidate);
-                            if (cube.asString() === candidate) {
-                                STATE_FACE_ORDER.forEach((f, fi) => {
-                                    this.scanConfirmedFaces[f] = labels.slice(fi * 9, fi * 9 + 9);
-                                });
-                                return candidate;
-                            }
-                        } catch (e) { /* 不合法，繼續 */ }
-                        // 還原
-                        [labels[i], labels[j]] = [labels[j], labels[i]];
-                    }
-                }
-                return null;
-            }
-
-            // 深度自動修復：依序嘗試所有可程式化的修復策略
-            // 1. 面方向旋轉（4096 種）— 處理單面旋轉錯誤
-            // 2. 兩兩貼紙對調（~1400 對）— 處理使用者修色時手抖弄反兩格
-            // 3. greedy 顏色數量平衡 — 處理多格輕微辨識錯誤
-            // 4. 整體方塊朝向重新分配（48 × 4096）— 處理使用者持方塊方向非 URFDLB 標準
-            // 找到就回傳，全部失敗才回 null
+            // 深度自動修復（4×4）：依成本由低到高依序嘗試
+            //   1. 面內旋轉搜尋  — 處理拍攝傾斜造成的單/多面旋轉錯位（最常見、最快）
+            //   2. greedy 顏色平衡 — 處理少數格輕微辨識錯誤（不動使用者修色）
+            // 找到合法 state 就回傳並已套用回 scanConfirmedFaces，全敗回 null。
+            //
+            // 為何沒有「整體方塊朝向重分配」策略：StateValidator4 的合法性（角塊/邊塊色組、
+            // 多重集合）在「保持對面配對的合法立方體旋轉重標籤」下是不變量（見 T7-5d 測試）。
+            // 因此任何朝向重標籤都不會把 _tryFaceRotationFix 找不到的解變成找得到——它只是換個
+            // 字母標籤，對 4×4（無固定中心、面身份由中心色指派）毫無額外修復力，故刻意不加，
+            // 避免永遠回 null 的死碼。
             _tryDeepAutoFix() {
                 console.log('[FIX] 開始深度自動修復...');
                 const t0 = performance.now();
 
-                let fixed = this._tryAutoOrientFaces();
+                let fixed = this._tryFaceRotationFix();
                 if (fixed) {
-                    console.log(`[FIX] ✓ 面旋轉成功 (${(performance.now() - t0).toFixed(0)}ms)`);
-                    return fixed;
-                }
-
-                fixed = this._trySwapPairs();
-                if (fixed) {
-                    console.log(`[FIX] ✓ 貼紙對調成功 (${(performance.now() - t0).toFixed(0)}ms)`);
+                    console.log(`[FIX] ✓ 面內旋轉成功 (${(performance.now() - t0).toFixed(0)}ms)`);
                     return fixed;
                 }
 
                 fixed = this._tryAutoBalance();
                 if (fixed) {
                     console.log(`[FIX] ✓ 顏色平衡成功 (${(performance.now() - t0).toFixed(0)}ms)`);
-                    return fixed;
-                }
-
-                // 最後手段：整體方塊朝向重分配（最慢，~3-6 秒）
-                console.log('[FIX] 嘗試 48 種方塊朝向重分配...');
-                fixed = this._tryCubeOrientations();
-                if (fixed) {
-                    console.log(`[FIX] ✓ 方塊朝向重分配成功 (${(performance.now() - t0).toFixed(0)}ms)`);
                     return fixed;
                 }
 
@@ -5168,35 +5105,16 @@
             // UNROTATE[r] maps: corrected_sticker_pos = captured_sticker_pos
             // r=0: no change; r=1: user held 90°CW → CCW correction;
             // r=2: 180°; r=3: user held 90°CCW → CW correction
-            static get _UNROTATE() {
-                return [
-                    [0,1,2,3,4,5,6,7,8],
-                    [2,5,8,1,4,7,0,3,6],
-                    [8,7,6,5,4,3,2,1,0],
-                    [6,3,0,7,4,1,8,5,2],
-                ];
+            // 4×4 角塊/邊塊的 (face, 面內位置) 對照表 — 由 CORNERS_4 / EDGE_CUBIES_4
+            // 的全域索引推導（全域索引 = 面序×16 + 面內位置）。供 two-shot 旋轉偵測使用。
+            static get _CUBE_CORNERS_4() {
+                return CORNERS_4.map(c => c.idx.map(gi => [STATE_FACE_ORDER[Math.floor(gi / 16)], gi % 16]));
             }
-            static get _CUBE_CORNERS() {
-                return [
-                    ['U',0,'B',2,'L',0], ['U',2,'B',0,'R',2],
-                    ['U',6,'F',0,'L',2], ['U',8,'F',2,'R',0],
-                    ['D',0,'F',6,'L',8], ['D',2,'F',8,'R',6],
-                    ['D',6,'B',8,'L',6], ['D',8,'B',6,'R',8],
-                ];
-            }
-            static get _CUBE_EDGES() {
-                return [
-                    ['U',1,'B',1], ['U',3,'L',1], ['U',5,'R',1], ['U',7,'F',1],
-                    ['F',3,'L',5], ['F',5,'R',3], ['F',7,'D',1],
-                    ['B',3,'R',5], ['B',5,'L',3], ['B',7,'D',7],
-                    ['D',3,'L',7], ['D',5,'R',7],
-                ];
-            }
-            static get _VALID_CORNER_SETS() {
-                return [
-                    ['U','B','L'],['U','B','R'],['U','F','L'],['U','F','R'],
-                    ['D','F','L'],['D','F','R'],['D','B','L'],['D','B','R'],
-                ];
+            static get _CUBE_EDGES_4() {
+                return EDGE_CUBIES_4.map(([a, b]) => [
+                    [STATE_FACE_ORDER[Math.floor(a / 16)], a % 16],
+                    [STATE_FACE_ORDER[Math.floor(b / 16)], b % 16],
+                ]);
             }
             // Single authoritative canonical RGB per face — used by both _matchClusters6 and _getCanonicalLab.
             static get _CANONICAL_RGB() {
@@ -5207,138 +5125,101 @@
                 };
             }
 
-            // Returns the best rotation index (0-3) to correct face sticker orientation.
-            // Uses corner/edge compatibility with already-confirmed adjacent faces.
-            // Returns 0 (no rotation) when no adjacent faces are available to score against.
-            _detectFaceOrientation(stickers9, slot) {
-                const UNROTATE = RubiksGame._UNROTATE;
-                const CORNERS = RubiksGame._CUBE_CORNERS;
-                const EDGES = RubiksGame._CUBE_EDGES;
-                const VALID_CS = RubiksGame._VALID_CORNER_SETS;
-                const OPP = {U:'D',D:'U',R:'L',L:'R',F:'B',B:'F'};
-                const confirmed = this.scanConfirmedFaces || {};
-
-                const scores = [0,0,0,0];
-                let hasData = false;
-
-                for (let r = 0; r < 4; r++) {
-                    const rot = UNROTATE[r].map(i => stickers9[i]);
-                    let score = 0;
-                    const getColor = (f,p) => f === slot ? rot[p] : (confirmed[f] && confirmed[f][p]);
-
-                    for (const [f1,p1,f2,p2,f3,p3] of CORNERS) {
-                        if (f1!==slot && f2!==slot && f3!==slot) continue;
-                        const c1=getColor(f1,p1), c2=getColor(f2,p2), c3=getColor(f3,p3);
-                        const known = [c1,c2,c3].filter(Boolean);
-                        if (known.length < 2) continue;
-                        hasData = true;
-                        const valid = VALID_CS.some(([a,b,c]) => known.every(col => [a,b,c].includes(col)));
-                        score += valid ? 2 : -2;
-                    }
-                    for (const [f1,p1,f2,p2] of EDGES) {
-                        if (f1!==slot && f2!==slot) continue;
-                        const c1=getColor(f1,p1), c2=getColor(f2,p2);
-                        if (!c1||!c2) continue;
-                        hasData = true;
-                        score += (c1!==c2 && OPP[c1]!==c2) ? 1 : -1;
-                    }
-                    scores[r] = score;
-                }
-
-                if (!hasData) return 0;
-                const maxS = Math.max(...scores);
-                if (maxS <= 0) return 0;
-                return scores.indexOf(maxS);
-            }
-
-            // Returns the best single rotation (0-3) to apply to ALL panels of a two-shot.
+            // 偵測 two-shot 一張照片裡所有面板共同的旋轉（0-3），使角塊/邊塊色組最合法。
+            // 4×4 幾何：面內 16 格，旋轉索引用 _faceRotationMaps，角塊/邊塊用 _CUBE_*_4 表。
+            // 回傳最佳旋轉 index；無足夠資料或無正分時回 0（不旋轉）。
             _detectTwoShotRotation(classifiedPanels) {
-                const UNROTATE = RubiksGame._UNROTATE;
-                const CORNERS = RubiksGame._CUBE_CORNERS;
-                const EDGES = RubiksGame._CUBE_EDGES;
-                const VALID_CS = RubiksGame._VALID_CORNER_SETS;
-                const OPP = {U:'D',D:'U',R:'L',L:'R',F:'B',B:'F'};
+                if (this.N !== 4) return 0;
+                const maps = RubiksGame._faceRotationMaps(this.N);
+                const CORNERS = RubiksGame._CUBE_CORNERS_4;
+                const EDGES = RubiksGame._CUBE_EDGES_4;
+                const OPP = FACE_OPPOSITES;
 
-                // Build a face→colors lookup from classified panels (keyed by face letter, not position slot)
+                // face → 該面 16 格 classifiedColors（key 為面字母，非 slot）
                 const panelMap = {};
                 (classifiedPanels || []).forEach(p => {
-                    const faceKey = p.expectedFace || p.key;
-                    if (faceKey) panelMap[faceKey] = p.classifiedColors;
+                    const k = p.expectedFace || p.key;
+                    if (k) panelMap[k] = p.classifiedColors;
                 });
                 if (Object.keys(panelMap).length === 0) return 0;
 
-                const scores = [0,0,0,0];
+                const scores = [0, 0, 0, 0];
                 let hasData = false;
-
                 for (let r = 0; r < 4; r++) {
-                    const getColor = (f,p) => {
+                    const getColor = (f, p) => {
                         const arr = panelMap[f]; if (!arr) return null;
-                        return arr[UNROTATE[r][p]];
+                        return arr[maps[r][p]];
                     };
                     let score = 0;
-                    for (const [f1,p1,f2,p2,f3,p3] of CORNERS) {
-                        const c1=getColor(f1,p1), c2=getColor(f2,p2), c3=getColor(f3,p3);
-                        const known=[c1,c2,c3].filter(Boolean);
+                    for (const corner of CORNERS) {
+                        const known = corner.map(([f, p]) => getColor(f, p)).filter(Boolean);
                         if (known.length < 2) continue;
                         hasData = true;
-                        const valid = VALID_CS.some(([a,b,c]) => known.every(col => [a,b,c].includes(col)));
-                        score += valid ? 2 : -2;
+                        const set = new Set(known);
+                        const legal = set.size === known.length
+                            && !(set.has('U') && set.has('D'))
+                            && !(set.has('L') && set.has('R'))
+                            && !(set.has('F') && set.has('B'));
+                        score += legal ? 2 : -2;
                     }
-                    for (const [f1,p1,f2,p2] of EDGES) {
-                        const c1=getColor(f1,p1), c2=getColor(f2,p2);
-                        if (!c1||!c2) continue;
-                        // Only score edges where BOTH panels are captured
-                        if (!panelMap[f1]||!panelMap[f2]) continue;
+                    for (const [[f1, p1], [f2, p2]] of EDGES) {
+                        if (!panelMap[f1] || !panelMap[f2]) continue; // 只算兩面都拍到的邊
+                        const c1 = getColor(f1, p1), c2 = getColor(f2, p2);
+                        if (!c1 || !c2) continue;
                         hasData = true;
-                        score += (c1!==c2 && OPP[c1]!==c2) ? 1 : -1;
+                        score += (c1 !== c2 && OPP[c1] !== c2) ? 1 : -1;
                     }
                     scores[r] = score;
                 }
-
                 if (!hasData) return 0;
                 const maxS = Math.max(...scores);
                 if (maxS <= 0) return 0;
                 return scores.indexOf(maxS);
             }
 
-            // Apply a rotation correction to all panels in shotReviewCurrentPanels.
+            // 套用旋轉修正到 shotReviewCurrentPanels 的所有面板（4×4：16 格、中心 2×2）。
             _applyTwoShotRotation(rotIdx) {
-                const map = RubiksGame._UNROTATE[rotIdx];
+                const map = RubiksGame._faceRotationMaps(this.N)[rotIdx];
                 const remap = arr => arr ? map.map(i => arr[i]) : null;
+                const centers = this.N === 4 ? CENTER_POS_4 : [4];
                 (this.shotReviewCurrentPanels || []).forEach(panel => {
                     panel.classifiedColors = remap(panel.classifiedColors);
                     if (panel.originalFaces) panel.originalFaces = remap(panel.originalFaces);
                     if (panel.confidence)    panel.confidence    = remap(panel.confidence);
                     if (panel.userEdits)     panel.userEdits     = remap(panel.userEdits);
-                    // Re-lock center to face label (expectedFace, not slot position key)
-                    panel.classifiedColors[4] = panel.expectedFace || panel.key;
+                    // 中心格鎖回面身份（由相機朝向決定，非顏色判讀）
+                    const face = panel.expectedFace || panel.key;
+                    centers.forEach(ci => { panel.classifiedColors[ci] = face; });
                 });
             }
 
-            // Manual rotate: 90° CW each click, for both six-face and two-shot modes.
+            // Manual rotate: 90° CW each click（六面逐面編輯）。N-aware（4×4：16 格）。
             rotateFaceEdit() {
                 if (!this.faceEditState) return;
-                const CW = [6,3,0,7,4,1,8,5,2]; // 90° CW mapping
-                const rotArr = arr => arr ? CW.map(i => arr[i]) : null;
-                this.faceEditState        = rotArr(this.faceEditState);
-                this.faceEditUserEdits    = rotArr(this.faceEditUserEdits);
-                this.faceEditUncertain    = rotArr(this.faceEditUncertain);
-                // Center (pos 4) stays slot — CW[4]=4 so it's already preserved
+                const cw = RubiksGame._faceRotationMaps(this.N)[1]; // 90° CW
+                const rotArr = arr => arr ? cw.map(i => arr[i]) : null;
+                this.faceEditState     = rotArr(this.faceEditState);
+                this.faceEditUserEdits = rotArr(this.faceEditUserEdits);
+                this.faceEditUncertain = rotArr(this.faceEditUncertain);
+                // 中心格的面身份不受影響：90° 旋轉表只在 4 個中心位置 [5,6,9,10] 之間互換，
+                // 不會把中心換到非中心位置，故面身份判讀仍鎖在中心區塊。
                 this._renderFaceEditGrid();
                 this._updateFaceEditCounts();
             }
 
-            // Manual rotate for two-shot review — cycles all panels together 90° CW.
+            // Manual rotate for two-shot review — cycles all panels together 90° CW. N-aware.
             rotateShotReview() {
                 if (!this.shotReviewCurrentPanels) return;
-                const CW = [6,3,0,7,4,1,8,5,2];
-                const rotArr = arr => arr ? CW.map(i => arr[i]) : null;
+                const cw = RubiksGame._faceRotationMaps(this.N)[1]; // 90° CW
+                const rotArr = arr => arr ? cw.map(i => arr[i]) : null;
+                const centers = this.N === 4 ? CENTER_POS_4 : [4];
                 this.shotReviewCurrentPanels.forEach(panel => {
                     panel.classifiedColors = rotArr(panel.classifiedColors);
                     if (panel.originalFaces) panel.originalFaces = rotArr(panel.originalFaces);
                     if (panel.confidence)    panel.confidence    = rotArr(panel.confidence);
                     if (panel.userEdits)     panel.userEdits     = rotArr(panel.userEdits);
-                    panel.classifiedColors[4] = panel.expectedFace || panel.key;
+                    const face = panel.expectedFace || panel.key;
+                    centers.forEach(ci => { panel.classifiedColors[ci] = face; });
                 });
                 this.renderShotReview();
             }
@@ -7272,7 +7153,7 @@
                 }
             }
 
-            // Phase 7：迴歸測試（針對近期修正：wireframe / _tryAutoOrientFaces / center click）
+            // Phase 7：迴歸測試（wireframe 幾何 / 4×4 面內旋轉自動修正 / 旋轉表 / center click）
             async runPhase7Tests(options = {}) {
                 const started = performance.now();
                 const results = [];
@@ -7323,31 +7204,25 @@
                         this.assertTest(spanPct >= 65 && spanPct <= 71, `iPhone13 span=${spanPct.toFixed(1)}% 不在 65-71%`);
                     });
 
-                    // ── T7-2：_tryAutoOrientFaces（單面旋轉 90°/180°/270° 全部能還原）
-                    run('T7-2 _tryAutoOrientFaces 單面旋轉', () => {
-                        if (!window.Cube) throw new Error('cubejs 未載入');
-                        const ROT = [
-                            [0,1,2,3,4,5,6,7,8],
-                            [6,3,0,7,4,1,8,5,2],
-                            [8,7,6,5,4,3,2,1,0],
-                            [2,5,8,1,4,7,0,3,6],
-                        ];
-                        const SOLVED = STATE_FACE_ORDER.map(f => f.repeat(9)).join('');
+                    // ── T7-2：_tryFaceRotationFix（單面旋轉錯位 → 還原為合法狀態）
+                    // 以真實 scramble（非全同色 SOLVED）為底，逐面注入 90/180/270° 面內旋轉，
+                    // 確認搜尋能找回通過 StateValidator4 的合法狀態。
+                    run('T7-2 _tryFaceRotationFix 單面旋轉還原', () => {
+                        const maps = RubiksGame._faceRotationMaps(4);
+                        const scr = RubiksGame._applyMoveList(SOLVED_STATE, ['R','U2',"F'",'Rw',"L","D'",'B2','Uw']);
+                        this.assertTest(StateValidator4.validate(scr).ok, '基準 scramble 應為合法 4×4 state');
                         const savedConfirmed = this.scanConfirmedFaces;
                         try {
                             for (let fi = 0; fi < 6; fi++) {
                                 for (let r = 1; r < 4; r++) {
                                     const f = STATE_FACE_ORDER[fi];
-                                    const scrambled = {};
-                                    STATE_FACE_ORDER.forEach((ff, i) => {
-                                        scrambled[ff] = SOLVED.slice(i*9, i*9+9).split('');
-                                    });
-                                    scrambled[f] = ROT[r].map(i => scrambled[f][i]);
-                                    this.scanConfirmedFaces = scrambled;
-                                    const fixed = this._tryAutoOrientFaces();
-                                    this.assertTest(fixed !== null, `${f}面旋轉${r*90}° 應能找到合法狀態`);
-                                    const cube = window.Cube.fromString(fixed);
-                                    this.assertTest(cube.asString() === fixed, `${f}面旋轉${r*90}° 修正後 cubejs 驗證通過`);
+                                    const faces = {};
+                                    STATE_FACE_ORDER.forEach((ff, i) => { faces[ff] = scr.slice(i*16, i*16+16).split(''); });
+                                    faces[f] = maps[r].map(i => faces[f][i]); // 故意把 f 面旋轉 r×90°
+                                    this.scanConfirmedFaces = faces;
+                                    const fixed = this._tryFaceRotationFix();
+                                    this.assertTest(fixed !== null, `${f}面旋轉${r*90}° 應能找回合法狀態`);
+                                    this.assertTest(StateValidator4.validate(fixed).ok, `${f}面旋轉${r*90}° 修正後應通過 StateValidator4`);
                                 }
                             }
                         } finally {
@@ -7355,34 +7230,22 @@
                         }
                     });
 
-                    // ── T7-3：_tryAutoOrientFaces（兩面同時旋轉）
-                    run('T7-3 _tryAutoOrientFaces 兩面旋轉', () => {
-                        if (!window.Cube) throw new Error('cubejs 未載入');
-                        const ROT = [
-                            [0,1,2,3,4,5,6,7,8],
-                            [6,3,0,7,4,1,8,5,2],
-                            [8,7,6,5,4,3,2,1,0],
-                            [2,5,8,1,4,7,0,3,6],
-                        ];
-                        const SOLVED = STATE_FACE_ORDER.map(f => f.repeat(9)).join('');
+                    // ── T7-3：_tryFaceRotationFix（兩面同時旋轉錯位，固定案例，無隨機性）
+                    run('T7-3 _tryFaceRotationFix 兩面旋轉還原', () => {
+                        const maps = RubiksGame._faceRotationMaps(4);
+                        const scr = RubiksGame._applyMoveList(SOLVED_STATE, ['F','R',"U'",'Rw2','Dw',"B'",'L2']);
                         const savedConfirmed = this.scanConfirmedFaces;
+                        const cases = [['U',1,'R',2],['F',3,'D',1],['L',2,'B',3],['U',2,'F',1]];
                         try {
-                            // 5 次隨機兩面旋轉
-                            for (let trial = 0; trial < 5; trial++) {
-                                const scrambled = {};
-                                STATE_FACE_ORDER.forEach((ff, i) => {
-                                    scrambled[ff] = SOLVED.slice(i*9, i*9+9).split('');
-                                });
-                                const f1 = Math.floor(Math.random() * 6);
-                                let f2; do { f2 = Math.floor(Math.random() * 6); } while (f2 === f1);
-                                const r1 = 1 + Math.floor(Math.random() * 3);
-                                const r2 = 1 + Math.floor(Math.random() * 3);
-                                scrambled[STATE_FACE_ORDER[f1]] = ROT[r1].map(i => scrambled[STATE_FACE_ORDER[f1]][i]);
-                                scrambled[STATE_FACE_ORDER[f2]] = ROT[r2].map(i => scrambled[STATE_FACE_ORDER[f2]][i]);
-                                this.scanConfirmedFaces = scrambled;
-                                const fixed = this._tryAutoOrientFaces();
-                                this.assertTest(fixed !== null,
-                                    `兩面旋轉(${STATE_FACE_ORDER[f1]}${r1*90}°,${STATE_FACE_ORDER[f2]}${r2*90}°) 應能還原`);
+                            for (const [fa, ra, fb, rb] of cases) {
+                                const faces = {};
+                                STATE_FACE_ORDER.forEach((ff, i) => { faces[ff] = scr.slice(i*16, i*16+16).split(''); });
+                                faces[fa] = maps[ra].map(i => faces[fa][i]);
+                                faces[fb] = maps[rb].map(i => faces[fb][i]);
+                                this.scanConfirmedFaces = faces;
+                                const fixed = this._tryFaceRotationFix();
+                                this.assertTest(fixed !== null, `兩面旋轉(${fa}${ra*90}°,${fb}${rb*90}°) 應能還原`);
+                                this.assertTest(StateValidator4.validate(fixed).ok, `兩面旋轉(${fa},${fb}) 修正後應通過 StateValidator4`);
                             }
                         } finally {
                             this.scanConfirmedFaces = savedConfirmed;
@@ -7424,112 +7287,74 @@
                         this.assertTest(fakePanel.classifiedColors.length === STICKERS_PER_FACE, '分類後仍應有 STICKERS_PER_FACE 格');
                     });
 
-                    // ── T7-5b：_trySwapPairs（兩拍貼紙位置弄反）
-                    run('T7-5b _trySwapPairs 對調修復', () => {
-                        if (!window.Cube) throw new Error('cubejs 未載入');
-                        const SOLVED = STATE_FACE_ORDER.map(f => f.repeat(9)).join('');
-                        const savedConfirmed = this.scanConfirmedFaces;
-                        const savedEdits = this.scanFaceUserEdits;
-                        try {
-                            // 模擬：使用者把 F[0] 跟 L[2] 寫反
-                            // 注意：必須是兩個未鎖定貼紙之間的 swap，且 swap 後必須是合法狀態
-                            const scrambled = {};
-                            STATE_FACE_ORDER.forEach((f, i) => {
-                                scrambled[f] = SOLVED.slice(i*9, i*9+9).split('');
-                            });
-                            // F[0]='L', L[2]='F'（人為對調）
-                            scrambled.F[0] = 'L';
-                            scrambled.L[2] = 'F';
-                            this.scanConfirmedFaces = scrambled;
-                            this.scanFaceUserEdits = {};
-                            const fixed = this._trySwapPairs();
-                            this.assertTest(fixed !== null, '_trySwapPairs 應能修復簡單對調 (F[0] ↔ L[2])');
-                            // 驗證修復後 cubejs 通過
-                            const cube = window.Cube.fromString(fixed);
-                            this.assertTest(cube.asString() === fixed, '修復後狀態應通過 cubejs 驗證');
-                        } finally {
-                            this.scanConfirmedFaces = savedConfirmed;
-                            this.scanFaceUserEdits = savedEdits;
-                        }
+                    // ── T7-5b：_faceRotationMaps 旋轉表正確性（N=4 與 N=3）
+                    run('T7-5b _faceRotationMaps 旋轉表', () => {
+                        const [id, r90, r180, r270] = RubiksGame._faceRotationMaps(4);
+                        const idStr = Array.from({ length: 16 }, (_, i) => i).join(',');
+                        [id, r90, r180, r270].forEach((m, k) => {
+                            this.assertTest(m.length === 16, `map[${k}] 長度應為 16`);
+                            this.assertTest([...m].sort((a, b) => a - b).join(',') === idStr, `map[${k}] 應為 0..15 排列`);
+                        });
+                        const apply = (m, arr) => m.map(i => arr[i]);
+                        let acc = Array.from({ length: 16 }, (_, i) => i);
+                        for (let k = 0; k < 4; k++) acc = apply(r90, acc);
+                        this.assertTest(acc.join(',') === id.join(','), 'r90 連套 4 次應回到身份');
+                        this.assertTest(apply(r90, apply(r90, id)).join(',') === r180.join(','), 'r90² 應等於 r180');
+                        // 中心 2×2 [5,6,9,10] 旋轉後仍落在中心集合
+                        const C = new Set([5, 6, 9, 10]);
+                        [r90, r180, r270].forEach((m, k) => {
+                            [5, 6, 9, 10].forEach(ci => this.assertTest(C.has(m[ci]), `4×4 中心 ${ci} 旋轉(${k}) 後仍在中心集合`));
+                        });
+                        // 3×3：中心固定在位置 4
+                        RubiksGame._faceRotationMaps(3).forEach((m, k) => {
+                            this.assertTest(m.length === 9 && m[4] === 4, `3×3 map[${k}] 中心應固定於 4`);
+                        });
                     });
 
-                    // ── T7-5c：_tryDeepAutoFix 整合（面旋轉 + 對調 + 平衡）
+                    // ── T7-5c：_tryDeepAutoFix 整合（4×4 面內旋轉錯位）
                     run('T7-5c _tryDeepAutoFix 整合修復', () => {
-                        if (!window.Cube) throw new Error('cubejs 未載入');
-                        const ROT = [[0,1,2,3,4,5,6,7,8],[6,3,0,7,4,1,8,5,2],[8,7,6,5,4,3,2,1,0],[2,5,8,1,4,7,0,3,6]];
-                        const SOLVED = STATE_FACE_ORDER.map(f => f.repeat(9)).join('');
+                        const maps = RubiksGame._faceRotationMaps(4);
+                        const scr = RubiksGame._applyMoveList(SOLVED_STATE, ['R',"U'",'F2','Rw','Lw',"D'",'B']);
                         const savedConfirmed = this.scanConfirmedFaces;
                         const savedEdits = this.scanFaceUserEdits;
                         try {
-                            // 案例 1：純面旋轉錯誤（U 面旋轉了 90°）
-                            const c1 = {};
-                            STATE_FACE_ORDER.forEach((f, i) => { c1[f] = SOLVED.slice(i*9, i*9+9).split(''); });
-                            c1.U = ROT[1].map(i => c1.U[i]);
-                            this.scanConfirmedFaces = c1;
+                            const faces = {};
+                            STATE_FACE_ORDER.forEach((f, i) => { faces[f] = scr.slice(i*16, i*16+16).split(''); });
+                            faces.U = maps[1].map(i => faces.U[i]); // U 面旋轉 90°
+                            faces.R = maps[2].map(i => faces.R[i]); // R 面旋轉 180°
+                            this.scanConfirmedFaces = faces;
                             this.scanFaceUserEdits = {};
-                            this.assertTest(this._tryDeepAutoFix() !== null, '案例1：U面旋轉90° 應修復');
-
-                            // 案例 2：兩格貼紙位置弄反
-                            const c2 = {};
-                            STATE_FACE_ORDER.forEach((f, i) => { c2[f] = SOLVED.slice(i*9, i*9+9).split(''); });
-                            c2.F[0] = 'L'; c2.L[2] = 'F';
-                            this.scanConfirmedFaces = c2;
-                            this.scanFaceUserEdits = {};
-                            this.assertTest(this._tryDeepAutoFix() !== null, '案例2：兩格對調 應修復');
+                            const fixed = this._tryDeepAutoFix();
+                            this.assertTest(fixed !== null, '_tryDeepAutoFix 應修復面內旋轉錯位');
+                            this.assertTest(StateValidator4.validate(fixed).ok, '修復後應通過 StateValidator4');
                         } finally {
                             this.scanConfirmedFaces = savedConfirmed;
                             this.scanFaceUserEdits = savedEdits;
                         }
                     });
 
-                    // ── T7-5d：_tryCubeOrientations（整體朝向重分配）
-                    run('T7-5d 整體方塊朝向重分配', () => {
-                        if (!window.Cube) throw new Error('cubejs 未載入');
-                        const SOLVED = STATE_FACE_ORDER.map(f => f.repeat(9)).join('');
-                        const savedConfirmed = this.scanConfirmedFaces;
-                        const savedEdits = this.scanFaceUserEdits;
-                        try {
-                            // 模擬「使用者把方塊轉了 90° 拍」：原本 U 的資料被當成 R，等等
-                            // 構造方式：取已解狀態，把 U/R/F/D/L/B 重新排列成 F/U/R/B/D/L
-                            // （這是 cube y' 旋轉後的狀態）
-                            // 然後也把貼紙字母對應地改寫
-                            const FACES = ['U','R','F','D','L','B'];
-                            // y' rotation: F is now where R was. Mapping: oldR→newF, oldF→newL, oldL→newB, oldB→newR
-                            const rotMap = {U:'U', R:'F', F:'L', D:'D', L:'B', B:'R'};  // newPos → oldPos
-                            const inverse = {};
-                            FACES.forEach(f => inverse[rotMap[f]] = f);
-                            const newFaces = {};
-                            FACES.forEach(f => {
-                                const orig = SOLVED.slice(FACES.indexOf(rotMap[f])*9, FACES.indexOf(rotMap[f])*9+9).split('');
-                                newFaces[f] = orig.map(c => inverse[c]);
-                            });
-                            this.scanConfirmedFaces = newFaces;
-                            this.scanFaceUserEdits = {};
-                            // 直接 _tryAutoOrientFaces 應該不夠（因為標籤錯誤）
-                            // _tryCubeOrientations 才能修
-                            const fixed = this._tryCubeOrientations();
-                            this.assertTest(fixed !== null, '_tryCubeOrientations 應能修復整體朝向錯誤');
-                            const cube = window.Cube.fromString(fixed);
-                            this.assertTest(cube.asString() === fixed, '修復後 cubejs 驗證通過');
-                        } finally {
-                            this.scanConfirmedFaces = savedConfirmed;
-                            this.scanFaceUserEdits = savedEdits;
-                        }
+                    // ── T7-5d：朝向重標籤合法性不變量（為何 4×4 不需要「整體朝向重分配」策略）
+                    // 合法立方體旋轉的字母重標籤（保持對面配對）不改變 StateValidator4 的合法性，
+                    // 故朝向重分配對 4×4 無額外修復力，_tryDeepAutoFix 刻意不含此策略（見其註解）。
+                    run('T7-5d 朝向重標籤合法性不變量', () => {
+                        const scr = RubiksGame._applyMoveList(SOLVED_STATE, ['R','U','F','Rw',"D'",'B2']);
+                        this.assertTest(StateValidator4.validate(scr).ok, '基準 scramble 合法');
+                        const FACES = STATE_FACE_ORDER;
+                        // 合法立方體旋轉（繞 R/L 軸 90°）：U→F→D→B→U，R、L 固定；newFace→oldFace
+                        const orient = { U: 'F', R: 'R', F: 'D', D: 'B', L: 'L', B: 'U' };
+                        const inverse = {}; FACES.forEach(f => inverse[orient[f]] = f);
+                        const blk = {}; FACES.forEach((f, i) => blk[f] = scr.slice(i*16, i*16+16));
+                        const relabeled = FACES.map(f => blk[orient[f]].split('').map(c => inverse[c]).join('')).join('');
+                        this.assertTest(StateValidator4.validate(relabeled).ok,
+                            '朝向重標籤後仍應合法（合法性為旋轉不變量）');
                     });
 
-                    // ── T7-6：ROT 保持中心格 (sanity check 配合 T7-2/T7-3)
-                    run('T7-6 ROT 矩陣中心保持', () => {
-                        const ROT = [
-                            [0,1,2,3,4,5,6,7,8],
-                            [6,3,0,7,4,1,8,5,2],
-                            [8,7,6,5,4,3,2,1,0],
-                            [2,5,8,1,4,7,0,3,6],
-                        ];
-                        for (let r = 0; r < 4; r++) {
-                            this.assertTest(ROT[r][4] === 4, `ROT[${r}][4] 應為 4`);
-                            const sorted = [...ROT[r]].sort((a,b)=>a-b).join(',');
-                            this.assertTest(sorted === '0,1,2,3,4,5,6,7,8', `ROT[${r}] 應為 0..8 排列`);
-                        }
+                    // ── T7-6：4×4 90°CW 旋轉表精確值（防止轉置/鏡射方向錯誤）
+                    run('T7-6 4×4 旋轉表精確值', () => {
+                        const r90 = RubiksGame._faceRotationMaps(4)[1];
+                        const expected = [12, 8, 4, 0, 13, 9, 5, 1, 14, 10, 6, 2, 15, 11, 7, 3];
+                        this.assertTest(r90.join(',') === expected.join(','),
+                            `r90 應為 ${expected.join(',')}，實得 ${r90.join(',')}`);
                     });
 
                     const elapsed = Math.round((performance.now() - started) * 100) / 100;
