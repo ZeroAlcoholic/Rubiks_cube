@@ -176,6 +176,19 @@ console.log('\n=== T-orient-5: 已合法時為 no-op（cost 0） ===');
     check(fixed === scr, '已合法輸入應原樣回傳（零旋轉）', fixed === scr ? '' : 'changed');
 }
 
+console.log('\n=== T-orient-6: 字母重標籤合法性不變量（為何不需整體朝向重分配） ===');
+{
+    const relabel = (s, map) => s.split('').map(c => map[c]).join('');
+    // 保持對面配對（三軸→三軸）：U→F→D→B→U、L/R 固定
+    const good = { U: 'F', F: 'D', D: 'B', B: 'U', L: 'L', R: 'R' };
+    check(StateValidator4.validate(relabel(scr, good)).ok,
+        '保持對面配對的字母重標籤後仍合法');
+    // 破壞對面配對（U↔R）→ 部分角塊出現兩同軸色 → 不合法（證明測試非恆真）
+    const bad = { U: 'R', R: 'U', F: 'F', B: 'B', L: 'L', D: 'D' };
+    check(!StateValidator4.validate(relabel(scr, bad)).ok,
+        '破壞對面配對的重標籤應使狀態不合法');
+}
+
 console.log('────────────────────────────');
 console.log(`  ${pass} passed, ${fail} failed (total ${pass + fail})`);
 if (fail > 0) {

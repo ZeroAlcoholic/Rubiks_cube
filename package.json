@@ -11,11 +11,12 @@
     "test:logic":    "node test_logic.cjs && node test_logic_4x4.cjs",
     "test:html":     "node test_html_4x4.cjs",
     "test:orient":   "node test_orient_4x4.cjs",
+    "test:sw":       "node tools/check-sw-cache.mjs",
     "test:solver":   "node test_solver_4x4.cjs",
     "test:baked":    "node tools/test-baked-tables.js",
     "test:solvers":  "node tools/test-solvers.js",
     "test:core":     "node test/core/test_modules_smoke.js && node test/core/test_geometry_n.js",
-    "test:all":      "npm run test:core && npm run test:logic && npm run test:html && npm run test:orient && npm run test:baked && npm run test:solvers",
+    "test:all":      "npm run test:core && npm run test:logic && npm run test:html && npm run test:orient && npm run test:sw && npm run test:baked && npm run test:solvers",
     "serve":         "python -m http.server 8000"
   }
 }

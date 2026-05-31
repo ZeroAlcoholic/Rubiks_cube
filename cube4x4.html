@@ -927,7 +927,6 @@
                 <select id="solver-variant" class="btn variant-select" onchange="game.setSolverVariant(this.value)" title="切換解題引擎">
                     <option value="fast" selected>速解</option>
                     <option value="fast-kociemba">兩階段最佳</option>
-                    <option value="yau-teach">教學版 Yau (beta)</option>
                 </select>
                 <button class="btn" onclick="game.reset()">
                     <span>🔄</span> 重置
@@ -4701,11 +4700,15 @@
             //   2. greedy 顏色平衡 — 處理少數格輕微辨識錯誤（不動使用者修色）
             // 找到合法 state 就回傳並已套用回 scanConfirmedFaces，全敗回 null。
             //
-            // 為何沒有「整體方塊朝向重分配」策略：StateValidator4 的合法性（角塊/邊塊色組、
-            // 多重集合）在「保持對面配對的合法立方體旋轉重標籤」下是不變量（見 T7-5d 測試）。
-            // 因此任何朝向重標籤都不會把 _tryFaceRotationFix 找不到的解變成找得到——它只是換個
-            // 字母標籤，對 4×4（無固定中心、面身份由中心色指派）毫無額外修復力，故刻意不加，
-            // 避免永遠回 null 的死碼。
+            // 為何沒有「整體方塊朝向重分配」策略（對 4×4 是死碼，刻意不加）：
+            //   1. 4×4 面身份由中心色指派（inferPanelFacesByCenters）。標準配色方塊的實體
+            //      對面色（白↔黃、紅↔橙、藍↔綠）正好對應到 canonical 的對面字母對，故指派
+            //      天然保持「對面配對」。校正完成後只剩面內旋轉錯位，_tryFaceRotationFix 即可
+            //      還原成合法 state。
+            //   2. StateValidator4 合法性在「保持對面配對的字母重標籤」下為不變量（見 T7-5d）。
+            //      因此整體朝向重標籤既無法把 _tryFaceRotationFix 找不到的解變成找得到，也修不了
+            //      「破壞對面配對」的中心誤判（那是顏色錯誤，非朝向）。兩種情況都無能為力，
+            //      加了只會永遠回 null。
             _tryDeepAutoFix() {
                 console.log('[FIX] 開始深度自動修復...');
                 const t0 = performance.now();
@@ -7022,9 +7025,16 @@
             // Switch solver variant. Called from the <select id="solver-variant">
             // onchange handler. The proxy.setVariant() resolves quickly because
             // BFS tables are shared across variants — only the post-centers
-            // strategy (cstimer vs cubejs vs Yau wrapper) is rebuilt.
+            // strategy (cstimer vs cubejs) is rebuilt.
+            //
+            // 'yau-teach' is intentionally NOT exposed in the UI: the spike
+            // (tools/yau-spike.mjs) showed a true Yau solver needs a P3 commutator
+            // engine for ~0 functional gain over Reduction, and the teaching
+            // wrapper added no extra solving power. The registry entry + worker
+            // support remain (test-covered, lazily loaded) but are unreachable
+            // from the menu, so the allow-list excludes it.
             async setSolverVariant(variant) {
-                const allowed = ['fast', 'fast-kociemba', 'yau-teach'];
+                const allowed = ['fast', 'fast-kociemba'];
                 if (!allowed.includes(variant)) return;
                 const proxy = window.__reduction?.solver;
                 if (!proxy || typeof proxy.setVariant !== 'function') {
@@ -7336,17 +7346,20 @@
                     // ── T7-5d：朝向重標籤合法性不變量（為何 4×4 不需要「整體朝向重分配」策略）
                     // 合法立方體旋轉的字母重標籤（保持對面配對）不改變 StateValidator4 的合法性，
                     // 故朝向重分配對 4×4 無額外修復力，_tryDeepAutoFix 刻意不含此策略（見其註解）。
-                    run('T7-5d 朝向重標籤合法性不變量', () => {
+                    run('T7-5d 字母重標籤合法性不變量', () => {
                         const scr = RubiksGame._applyMoveList(SOLVED_STATE, ['R','U','F','Rw',"D'",'B2']);
                         this.assertTest(StateValidator4.validate(scr).ok, '基準 scramble 合法');
-                        const FACES = STATE_FACE_ORDER;
-                        // 合法立方體旋轉（繞 R/L 軸 90°）：U→F→D→B→U，R、L 固定；newFace→oldFace
-                        const orient = { U: 'F', R: 'R', F: 'D', D: 'B', L: 'L', B: 'U' };
-                        const inverse = {}; FACES.forEach(f => inverse[orient[f]] = f);
-                        const blk = {}; FACES.forEach((f, i) => blk[f] = scr.slice(i*16, i*16+16));
-                        const relabeled = FACES.map(f => blk[orient[f]].split('').map(c => inverse[c]).join('')).join('');
-                        this.assertTest(StateValidator4.validate(relabeled).ok,
-                            '朝向重標籤後仍應合法（合法性為旋轉不變量）');
+                        const relabel = (s, map) => s.split('').map(c => map[c]).join('');
+                        // 保持對面配對的字母重標籤（U↔D、L↔R、F↔B 三軸對映到三軸）：
+                        // U→F→D→B→U（{U,D}→{F,B}→{U,D}），L、R 固定。合法性不變。
+                        const good = { U: 'F', F: 'D', D: 'B', B: 'U', L: 'L', R: 'R' };
+                        this.assertTest(StateValidator4.validate(relabel(scr, good)).ok,
+                            '保持對面配對的字母重標籤後仍合法（合法性為重標籤不變量）');
+                        // 破壞對面配對的重標籤（U↔R）會把某些角塊變成兩同軸色 → 不合法，
+                        // 證明上面的不變量有前提、測試非恆真。
+                        const bad = { U: 'R', R: 'U', F: 'F', B: 'B', L: 'L', D: 'D' };
+                        this.assertTest(!StateValidator4.validate(relabel(scr, bad)).ok,
+                            '破壞對面配對的重標籤應使狀態不合法');
                     });
 
                     // ── T7-6：4×4 90°CW 旋轉表精確值（防止轉置/鏡射方向錯誤）
