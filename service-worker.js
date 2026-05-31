@@ -9,7 +9,7 @@
 // next page load the new SW activates, deletes old caches, and the user
 // transparently gets the fresh bundle.
 
-const CACHE_VERSION = 'rubiks-v2-2026-05-31';
+const CACHE_VERSION = 'rubiks-v1-2026-06-01';
 
 // Files that MUST exist for the app to boot. Listed by URL (relative to /),
 // so this file deploys correctly under GitHub Pages subpaths.
